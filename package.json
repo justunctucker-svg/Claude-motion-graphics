@@ -1,0 +1,11 @@
+{
+  "name": "claude-motion-graphics",
+  "private": true,
+  "scripts": {
+    "render": "node render.js out/motion.mp4",
+    "preview": "node render.js out/preview.mp4 --preview"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}

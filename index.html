@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt to Motion</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; display: block; }
+  #hint { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center; color: #fff6;
+          font: 12px monospace; pointer-events: none; }
+  body.render #hint { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<div id="hint">space: pause · ←/→: scrub · r: restart</div>
+<script>
+// Prompt-to-motion: a 15s cinematic sequence drawn entirely in code.
+// Everything is a pure function of time t, so any frame can be rendered on demand.
+const W = 1920, H = 1080, DURATION = 15, FPS = 30;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const MONO = '"DejaVu Sans Mono", "JetBrains Mono", Menlo, Consolas, monospace';
+const SANS = '"Inter Display", "Inter", system-ui, sans-serif';
+const ORANGE = '#ff6a3d', ORANGE_RGB = '255,106,61';
+const INK = '#eaf0ff';
+
+// ---------- math helpers ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const range = (t, a, b) => clamp((t - a) / (b - a));
+const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const easeInOutCubic = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const easeOutExpo = k => k >= 1 ? 1 : 1 - Math.pow(2, -10 * k);
+const easeOutBack = k => { const c = 1.70158; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); };
+function hash(n) { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+
+// ---------- camera ----------
+const F = 1350, PITCH = 0.08;
+function camAt(t) {
+  let z = -3 + 3 * easeInOutCubic(range(t, 0, 7.4));          // slow push while typing
+  z += 40 * easeInOutCubic(range(t, 7.5, 10.6));               // fly-through
+  z += 0.6 * Math.max(0, t - 10.6);                            // cruise
+  return { x: Math.sin(t * 0.35) * 0.25, y: 2.0 + Math.sin(t * 0.5) * 0.05, z, yaw: Math.sin(t * 0.3) * 0.025 };
+}
+function project(cam, x, y, z) {
+  const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z;
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  const x1 = dx * cy - dz * sy, z1 = dx * sy + dz * cy;
+  const cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+  const y2 = dy * cp + z1 * sp, z2 = -dy * sp + z1 * cp;
+  if (z2 < 0.05) return null;
+  return { x: W / 2 + F * x1 / z2, y: H / 2 - F * y2 / z2, z: z2 };
+}
+
+// ---------- prompt text layout ----------
+const PROMPT = 'create a 15-second cinematic motion graphics sequence with kinetic typography, smooth transitions, 3D elements and a slow camera push';
+const PW = 1600, PH = 600;               // panel texture size
+const FONT_PX = 62, LINE_H = 84, TEXT_X = 110, TEXT_Y = 130;
+const panel = document.createElement('canvas'); panel.width = PW; panel.height = PH;
+const pctx = panel.getContext('2d');
+let chars = [], words = [], CW = 34;
+const TYPE_START = 1.5;
+
+function layoutPrompt() {
+  pctx.font = `bold ${FONT_PX}px ${MONO}`;
+  CW = pctx.measureText('M').width;
+  const maxCols = Math.floor((PW - TEXT_X - 90) / CW);
+  chars = []; words = [];
+  let line = 0, col = 0, t = TYPE_START;
+  PROMPT.split(' ').forEach((w, wi) => {
+    if (col > 0 && col + w.length > maxCols) { line++; col = 0; }
+    const word = { text: w, first: chars.length, line, col, start: t };
+    for (let i = 0; i < w.length; i++) {
+      const ch = w[i];
+      t += 0.032 + hash(chars.length) * 0.028 + (ch === ',' ? 0.18 : 0);
+      chars.push({ ch, x: TEXT_X + (col + i) * CW, y: TEXT_Y + line * LINE_H, t, word: wi });
+    }
+    word.last = chars.length - 1; word.end = t;
+    words.push(word);
+    col += w.length + 1;
+    t += 0.05;                                   // the space
+  });
+}
+const TYPE_END = () => chars[chars.length - 1].t;
+const ENTER_T = 7.05;
+
+function wordIndexAt(t) {
+  for (let i = words.length - 1; i >= 0; i--) if (t >= words[i].start) return i;
+  return -1;
+}
+function threeDTime() { return words.find(w => w.text === '3D').end; }
+
+const GLYPHS = '!<>-_\\/[]{}=+*^?#01ABXYZ';
+const TOKEN_POOL = ['frame', 'render', 'easing', 'glow', 'scene', 'depth', 'loop', 'beat', 'light', 'shader'];
+
+// ---------- the prompt panel (drawn to a texture, then mapped into 3D) ----------
+function drawPanel(t) {
+  const c = pctx;
+  c.clearRect(0, 0, PW, PH);
+  const appear = easeOutCubic(range(t, 0.7, 1.5));
+  const explode = easeInOutCubic(range(t, 7.6, 9.2));
+  const enter = range(t, ENTER_T, ENTER_T + 0.5);
+  const enterFlash = enter > 0 && enter < 1 ? Math.sin(enter * Math.PI) : 0;
+
+  // frame lines that draw outward from the corners
+  c.save();
+  c.globalAlpha = 1 - explode;
+  c.strokeStyle = `rgba(220,230,255,${0.55 + enterFlash * 0.45})`;
+  c.lineWidth = 2;
+  const L = 40, R = PW - 40, T = 40, B = PH - 40;
+  c.beginPath();
+  c.moveTo(L, T); c.lineTo(lerp(L, R + 30, appear), T);
+  c.moveTo(R, B); c.lineTo(lerp(R, L - 30, appear), B);
+  c.moveTo(L, T - 20); c.lineTo(L, lerp(T - 20, B, appear));
+  c.moveTo(R, B + 20); c.lineTo(R, lerp(B + 20, T, appear));
+  c.stroke();
+  // tick marks on the top rule
+  c.lineWidth = 1;
+  for (let i = 0; i <= 16; i++) {
+    const x = L + (R - L) * i / 16;
+    if (i / 16 > appear) break;
+    c.beginPath(); c.moveTo(x, T); c.lineTo(x, T + (i % 4 ? 6 : 14)); c.stroke();
+  }
+  c.restore();
+
+  const n = chars.filter(ch => t >= ch.t).length;
+  const wi = wordIndexAt(t);
+  const typing = t < TYPE_END() + 0.2;
+
+  // prompt caret
+  c.font = `bold ${FONT_PX}px ${MONO}`;
+  c.textBaseline = 'alphabetic';
+  c.globalAlpha = appear * (1 - explode);
+  c.fillStyle = 'rgba(234,240,255,0.8)';
+  c.fillText('>', 50, TEXT_Y);
+
+  // characters
+  chars.forEach((ch, i) => {
+    const age = t - ch.t;
+    if (age < 0) return;
+    let x = ch.x, y = ch.y + 14 * (1 - easeOutCubic(clamp(age / 0.14)));
+    let alpha = clamp(age / 0.06);
+    if (explode > 0) {
+      x += (hash(i * 3.1) - 0.5) * 1400 * explode * explode;
+      y += (hash(i * 7.7) - 0.3) * 700 * explode * explode;
+      alpha *= (1 - explode) ** 2;
+    }
+    const glyph = age < 0.07 ? GLYPHS[Math.floor(hash(i + Math.floor(t * 40)) * GLYPHS.length)] : ch.ch;
+    const live = typing && ch.word === wi;
+    const split = Math.max(0, 1 - age / 0.35) * 9 + enterFlash * 6;
+    c.globalAlpha = alpha;
+    if (split > 0.3) {
+      c.globalCompositeOperation = 'lighter';
+      c.fillStyle = 'rgba(255,40,60,0.7)'; c.fillText(glyph, x - split, y);
+      c.fillStyle = 'rgba(40,200,255,0.7)'; c.fillText(glyph, x + split, y);
+      c.globalCompositeOperation = 'source-over';
+    }
+    c.fillStyle = live ? ORANGE : INK;
+    c.fillText(glyph, x, y);
+  });
+  c.globalAlpha = 1;
+
+  // highlight bar + reticle on the word being typed
+  if (wi >= 0 && typing && explode === 0) {
+    const w = words[wi];
+    const shown = Math.max(0, Math.min(w.last, n - 1) - w.first + 1);
+    const x0 = TEXT_X + w.col * CW, y0 = TEXT_Y + w.line * LINE_H;
+    c.fillStyle = ORANGE;
+    c.fillRect(x0, y0 + 12, shown * CW, 4);
+    const cx = x0 + (w.text.length * CW) / 2, cy = y0 - 18;
+    const r = 58 + Math.sin(t * 6) * 3;
+    c.save();
+    c.translate(cx, cy); c.rotate(t * 1.4);
+    c.strokeStyle = 'rgba(234,240,255,0.55)'; c.lineWidth = 1.5;
+    c.setLineDash([14, 10]);
+    c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2); c.stroke();
+    c.setLineDash([]);
+    for (let k = 0; k < 4; k++) {
+      c.rotate(Math.PI / 2);
+      c.beginPath(); c.moveTo(r + 4, 0); c.lineTo(r + 16, 0); c.stroke();
+    }
+    c.restore();
+    c.font = `16px ${MONO}`; c.fillStyle = `rgba(${ORANGE_RGB},0.9)`;
+    c.fillText(`ATTN ${(0.8 + hash(wi) * 0.19).toFixed(2)}`, cx + r + 20, cy - r + 10);
+  }
+
+  // blinking caret
+  if (explode === 0 && t > 1.2) {
+    const last = chars[Math.max(0, n - 1)];
+    const cx = n === 0 ? TEXT_X : last.x + CW + 4;
+    const cy = n === 0 ? TEXT_Y : last.y;
+    if (Math.floor(t * 3) % 2 === 0 || typing && n < chars.length) {
+      c.globalAlpha = appear;
+      c.fillStyle = ORANGE; c.fillRect(cx, cy - FONT_PX * 0.78, 5, FONT_PX * 0.9);
+      c.globalAlpha = 1;
+    }
+  }
+
+  // next-token HUD (bottom-left)
+  const hudA = appear * (1 - explode) * range(t, 1.6, 2.0);
+  if (hudA > 0) {
+    c.globalAlpha = hudA;
+    const hx = 110, hy = 440;
+    c.font = `15px ${MONO}`; c.fillStyle = 'rgba(234,240,255,0.5)';
+    c.fillText('next token        p      sampled', hx, hy);
+    const cur = Math.max(0, Math.min(words.length - 1, wi + 1));
+    const top = 0.55 + hash(cur * 1.3) * 0.35;
+    const rows = [
+      [words[cur].text.replace(',', ''), top],
+      [TOKEN_POOL[Math.floor(hash(cur * 2.9) * TOKEN_POOL.length)], (1 - top) * 0.6],
+      [TOKEN_POOL[Math.floor(hash(cur * 5.3) * TOKEN_POOL.length)], (1 - top) * 0.25],
+    ];
+    rows.forEach(([tok, p], k) => {
+      const y = hy + 26 + k * 24;
+      c.fillStyle = k === 0 ? `rgba(${ORANGE_RGB},0.95)` : 'rgba(234,240,255,0.25)';
+      c.fillRect(hx + 250, y - 12, 160 * p, 10);
+      c.fillStyle = k === 0 ? ORANGE : 'rgba(234,240,255,0.6)';
+      c.fillText(tok.slice(0, 14).padEnd(16) + p.toFixed(2), hx, y);
+    });
+  }
+
+  // footer readouts (bottom-right)
+  if (appear > 0) {
+    c.globalAlpha = appear * (1 - explode);
+    c.font = `bold 16px ${MONO}`; c.textAlign = 'right';
+    c.fillStyle = 'rgba(234,240,255,0.55)';
+    c.fillText(`CONTEXT ${String(n * 7).padStart(4, '0')} / 200000`, PW - 60, PH - 56);
+    c.fillText(`T 0.7 · top-p 0.95 · output: code, not pixels`, PW - 60, PH - 80);
+    c.fillStyle = enter > 0 ? ORANGE : 'rgba(234,240,255,0.55)';
+    c.fillText(enter > 0 ? 'keyframes requested: 0  ·  compiling scene…' : 'keyframes requested: 0', PW - 60, PH - 104);
+    c.textAlign = 'left';
+    // PROMPT tag
+    c.fillStyle = ORANGE; c.fillRect(L, PH - 34, 120, 22);
+    c.fillStyle = '#0a0f1a'; c.font = `bold 15px ${MONO}`; c.fillText('PROMPT 01', L + 10, PH - 18);
+    // enter key
+    const ex = PW - 130, ey = 300;
+    c.strokeStyle = enterFlash > 0 ? ORANGE : 'rgba(234,240,255,0.6)';
+    c.fillStyle = `rgba(${ORANGE_RGB},${enterFlash * 0.5})`;
+    c.lineWidth = 2;
+    c.fillRect(ex, ey, 56, 46); c.strokeRect(ex, ey, 56, 46);
+    c.beginPath(); c.moveTo(ex + 40, ey + 12); c.lineTo(ex + 40, ey + 28); c.lineTo(ex + 14, ey + 28);
+    c.moveTo(ex + 20, ey + 22); c.lineTo(ex + 14, ey + 28); c.lineTo(ex + 20, ey + 34); c.stroke();
+  }
+  c.globalAlpha = 1;
+}
+
+function blitPanel(cam, t) {
+  const z = 9, hw = 5, hh = 5 * PH / PW, cy = 2.2;
+  const tl = project(cam, -hw, cy + hh, z), tr = project(cam, hw, cy + hh, z), bl = project(cam, -hw, cy - hh, z);
+  if (!tl || !tr || !bl) return;
+  const dist = z - cam.z;
+  const a = clamp((dist - 1.2) / 3);
+  if (a <= 0) return;
+  drawPanel(t);
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.setTransform((tr.x - tl.x) / PW, (tr.y - tl.y) / PW, (bl.x - tl.x) / PH, (bl.y - tl.y) / PH, tl.x, tl.y);
+  ctx.shadowColor = 'rgba(160,190,255,0.35)'; ctx.shadowBlur = 12;
+  ctx.drawImage(panel, 0, 0);
+  ctx.restore();
+}
+
+// ---------- environment ----------
+function drawBackground(cam) {
+  const g = ctx.createRadialGradient(W / 2, H * 0.42, 50, W / 2, H * 0.5, W * 0.75);
+  g.addColorStop(0, '#13213a'); g.addColorStop(0.5, '#0a1324'); g.addColorStop(1, '#03060c');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const hz = H / 2 - F * Math.tan(PITCH);
+  const hg = ctx.createLinearGradient(0, hz - 120, 0, hz + 60);
+  hg.addColorStop(0, 'rgba(90,130,220,0)'); hg.addColorStop(0.7, 'rgba(110,150,240,0.16)'); hg.addColorStop(1, 'rgba(90,130,220,0)');
+  ctx.fillStyle = hg; ctx.fillRect(0, hz - 120, W, 180);
+}
+
+function drawGrid(cam, t) {
+  const reveal = easeOutCubic(range(t, 0.1, 1.4));
+  const speed = range(t, 7.6, 8.4) * (1 - range(t, 10.0, 10.8));
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = 1.3;
+  const far = 75, near = 0.6;
+  const seg = (x0, z0, x1, z1, alpha) => {
+    const a = project(cam, x0, 0, z0), b = project(cam, x1, 0, z1);
+    if (!a || !b) return;
+    ctx.strokeStyle = `rgba(150,180,240,${alpha})`;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+  };
+  const fog = d => clamp(1 - d / far) ** 1.6;
+  // lines running into the distance
+  for (let x = -30; x <= 30; x += 2) {
+    const steps = 10;
+    for (let s = 0; s < steps; s++) {
+      const za = cam.z + near + (far * reveal) * s / steps, zb = cam.z + near + (far * reveal) * (s + 1) / steps;
+      seg(x, za, x, zb, 0.55 * fog(za - cam.z) * reveal);
+    }
+  }
+  // cross lines
+  const z0 = Math.ceil((cam.z + near) / 2) * 2;
+  for (let k = 0; k < 40; k++) {
+    const z = z0 + k * 2, d = z - cam.z;
+    if (d > far * reveal) break;
+    seg(-30, z, 30, z, 0.5 * fog(d) * reveal);
+  }
+  // speed streaks during the fly-through
+  if (speed > 0) {
+    for (let i = 0; i < 40; i++) {
+      const x = (hash(i) - 0.5) * 24, y = 0.3 + hash(i * 2.3) * 5;
+      const z = cam.z + 2 + ((hash(i * 4.1) * 60 - t * 50) % 60 + 60) % 60;
+      const a = project(cam, x, y, z), b = project(cam, x, y, z + 4 * speed);
+      if (!a || !b) continue;
+      ctx.strokeStyle = i % 5 ? `rgba(180,210,255,${0.35 * speed})` : `rgba(${ORANGE_RGB},${0.6 * speed})`;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- wireframe solids ----------
+function rotPoint([x, y, z], ax, ay) {
+  let c = Math.cos(ay), s = Math.sin(ay);
+  [x, z] = [x * c - z * s, x * s + z * c];
+  c = Math.cos(ax); s = Math.sin(ax);
+  [y, z] = [y * c - z * s, y * s + z * c];
+  return [x, y, z];
+}
+function drawSolid(cam, verts, edges, center, scale, ax, ay, color, alpha, dots) {
+  if (alpha <= 0 || scale <= 0) return;
+  const pts = verts.map(v => {
+    const [x, y, z] = rotPoint(v, ax, ay);
+    return project(cam, center[0] + x * scale, center[1] + y * scale, center[2] + z * scale);
+  });
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.strokeStyle = `rgba(${color},${alpha})`; ctx.lineWidth = 1.6;
+  ctx.shadowColor = `rgba(${color},0.8)`; ctx.shadowBlur = 10;
+  ctx.beginPath();
+  edges.forEach(([a, b]) => { if (pts[a] && pts[b]) { ctx.moveTo(pts[a].x, pts[a].y); ctx.lineTo(pts[b].x, pts[b].y); } });
+  ctx.stroke();
+  if (dots) {
+    ctx.fillStyle = `rgba(${ORANGE_RGB},${alpha})`;
+    pts.forEach(p => p && ctx.fillRect(p.x - 3, p.y - 3, 6, 6));
+  }
+  ctx.restore();
+}
+const CUBE_V = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+const CUBE_E = [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]];
+const PYR_V = [[0,-1.3,0],[-1,0.7,-1],[1,0.7,-1],[1,0.7,1],[-1,0.7,1]];
+const PYR_E = [[0,1],[0,2],[0,3],[0,4],[1,2],[2,3],[3,4],[4,1]];
+const PHI = (1 + Math.sqrt(5)) / 2;
+const ICO_V = [[-1,PHI,0],[1,PHI,0],[-1,-PHI,0],[1,-PHI,0],[0,-1,PHI],[0,1,PHI],[0,-1,-PHI],[0,1,-PHI],[PHI,0,-1],[PHI,0,1],[-PHI,0,-1],[-PHI,0,1]]
+  .map(v => v.map(c => c / Math.hypot(1, PHI)));
+const ICO_E = [];
+for (let i = 0; i < 12; i++) for (let j = i + 1; j < 12; j++) {
+  const d = Math.hypot(...ICO_V[i].map((c, k) => c - ICO_V[j][k]));
+  if (Math.abs(d - 2 / Math.hypot(1, PHI)) < 0.01) ICO_E.push([i, j]);
+}
+
+function drawProps(cam, t) {
+  const k = easeOutBack(range(t, threeDTime(), threeDTime() + 0.6));
+  drawSolid(cam, CUBE_V, CUBE_E, [6.6, 1.6, 11], 0.8 * k, t * 0.6, t * 0.9, ORANGE_RGB, 0.85, false);
+  drawSolid(cam, PYR_V, PYR_E, [7.2, 3.6, 10], 0.75 * k, 0.2, t * 1.2, '234,240,255', 0.75, false);
+  const k2 = easeOutBack(range(t, 2.4, 3.0));
+  drawSolid(cam, CUBE_V, CUBE_E, [-7.4, 3.8, 13], 0.45 * k2, t * 0.4, -t * 0.7, '150,180,240', 0.45, false);
+}
+
+// ---------- kinetic words during the fly-through ----------
+const SLAMS = [
+  { text: 'NO KEYFRAMES.', t0: 8.0 },
+  { text: 'NO TIMELINE.', t0: 8.9 },
+  { text: 'JUST A PROMPT.', t0: 9.8, accent: 'PROMPT.' },
+];
+function drawSlams(t) {
+  SLAMS.forEach(({ text, t0, accent }, si) => {
+    const t1 = t0 + 0.9;
+    if (t < t0 || t > t1 + 0.05) return;
+    ctx.save();
+    ctx.font = `bold 170px ${SANS}`;
+    ctx.textBaseline = 'middle';
+    const total = ctx.measureText(text).width;
+    let x = W / 2 - total / 2;
+    const wipe = easeInOutCubic(range(t, t1 - 0.22, t1));
+    if (wipe > 0) {                                     // wipe off left-to-right with an orange bar
+      ctx.beginPath(); ctx.rect(W / 2 - total / 2 + total * wipe, 0, W, H); ctx.clip();
+    }
+    const accentStart = accent ? text.indexOf(accent) : -1;
+    [...text].forEach((ch, j) => {
+      const lt = t - t0 - j * 0.022;
+      const cw = ctx.measureText(ch).width;
+      if (lt > 0) {
+        const k = easeOutExpo(clamp(lt / 0.35));
+        const s = 1 + 0.7 * (1 - k);
+        const split = (1 - k) * 22;
+        const cx = x + cw / 2, cy = H / 2 + (1 - k) * (j % 2 ? 40 : -40);
+        ctx.save();
+        ctx.translate(cx, cy); ctx.scale(s, s);
+        ctx.globalAlpha = clamp(lt / 0.12);
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.fillStyle = 'rgba(255,40,60,0.8)'; ctx.fillText(ch, -cw / 2 - split, 0);
+        ctx.fillStyle = 'rgba(40,200,255,0.8)'; ctx.fillText(ch, -cw / 2 + split, 0);
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = accentStart >= 0 && j >= accentStart ? ORANGE : '#ffffff';
+        ctx.fillText(ch, -cw / 2, 0);
+        ctx.restore();
+      }
+      x += cw;
+    });
+    ctx.restore();
+    if (wipe > 0 && wipe < 1) {
+      ctx.fillStyle = ORANGE;
+      ctx.fillRect(W / 2 - total / 2 + total * wipe - 6, H / 2 - 110, 12, 220);
+    }
+    // little index tag
+    ctx.font = `bold 18px ${MONO}`; ctx.fillStyle = `rgba(${ORANGE_RGB},${1 - wipe})`;
+    ctx.fillText(`0${si + 1} / 03`, W / 2 - total / 2, H / 2 - 120);
+  });
+}
+
+// ---------- hero end card ----------
+function drawHero(cam, t) {
+  if (t < 10.7) return;
+  const k = easeOutBack(range(t, 10.7, 11.6));
+  const center = [cam.x, cam.y + 0.75, cam.z + 7];
+  drawSolid(cam, ICO_V, ICO_E, center, 1.25 * k, t * 0.5, t * 0.7, '234,240,255', 0.85, true);
+  drawSolid(cam, ICO_V, ICO_E, center, 1.9 * k, -t * 0.3, t * 0.4, '150,180,240', 0.22, false);
+
+  const p = project(cam, ...center);
+  if (p) {                                            // spark at the core
+    const sk = easeOutBack(range(t, 11.0, 11.6));
+    ctx.save();
+    ctx.translate(p.x, p.y); ctx.rotate(t * 0.8);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = ORANGE; ctx.lineCap = 'round';
+    ctx.shadowColor = ORANGE; ctx.shadowBlur = 25;
+    for (let i = 0; i < 10; i++) {
+      const len = (34 + 18 * Math.sin(t * 4 + i * 1.7)) * sk;
+      ctx.lineWidth = 6;
+      ctx.rotate(Math.PI * 2 / 10);
+      ctx.beginPath(); ctx.moveTo(8 * sk, 0); ctx.lineTo(len, 0); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // title
+  const title = 'MOTION GRAPHICS';
+  ctx.save();
+  ctx.font = `bold 128px ${SANS}`; ctx.textBaseline = 'alphabetic';
+  const track = lerp(60, 14, easeOutCubic(range(t, 11.2, 12.6)));
+  const widths = [...title].map(ch => ctx.measureText(ch).width);
+  const total = widths.reduce((a, b) => a + b, 0) + track * (title.length - 1);
+  let x = W / 2 - total / 2;
+  [...title].forEach((ch, j) => {
+    const lt = range(t, 11.2 + j * 0.035, 11.75 + j * 0.035);
+    const e = easeOutCubic(lt);
+    ctx.globalAlpha = e;
+    ctx.fillStyle = ch === ' ' ? 'transparent' : '#ffffff';
+    ctx.fillText(ch, x, 790 + (1 - e) * 70);
+    x += widths[j] + track;
+  });
+  // underline sweeps out from the middle
+  const ul = easeInOutCubic(range(t, 11.9, 12.7));
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = ORANGE;
+  ctx.fillRect(W / 2 - (total / 2) * ul, 822, total * ul, 5);
+  // subtitle types on
+  const sub = 'written in code  ·  rendered frame by frame  ·  0 keyframes';
+  const shown = Math.floor(sub.length * range(t, 12.4, 13.6));
+  ctx.font = `24px ${MONO}`; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(234,240,255,0.75)';
+  ctx.fillText(sub.slice(0, shown) + (shown < sub.length && shown > 0 ? '▍' : ''), W / 2, 880);
+  ctx.restore();
+}
+
+// ---------- overlays ----------
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+(() => {
+  const g = grain.getContext('2d'), img = g.createImageData(256, 256);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = hash(i * 0.37) * 255;
+    img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+})();
+
+function drawHUD(cam, t) {
+  const a = range(t, 0.4, 1.0) * 0.55;
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = '#eaf0ff'; ctx.lineWidth = 2;
+  const m = 56, s = 36;
+  [[m, m, 1, 1], [W - m, m, -1, 1], [m, H - m, 1, -1], [W - m, H - m, -1, -1]].forEach(([x, y, dx, dy]) => {
+    ctx.beginPath(); ctx.moveTo(x, y + s * dy); ctx.lineTo(x, y); ctx.lineTo(x + s * dx, y); ctx.stroke();
+  });
+  ctx.font = `bold 18px ${MONO}`; ctx.fillStyle = '#eaf0ff';
+  const f = Math.floor(t * FPS);
+  const tc = `00:00:${String(Math.floor(t)).padStart(2, '0')}:${String(f % FPS).padStart(2, '0')}`;
+  ctx.fillText('SEQ_01  ·  PROMPT → MOTION', m + 50, m + 26);
+  ctx.textAlign = 'right';
+  ctx.fillText(tc, W - m - 50, m + 26);
+  ctx.fillText('1920×1080 · 30fps · canvas2d', W - m - 50, H - m - 14);
+  ctx.textAlign = 'left';
+  ctx.fillText(`f=${F}  z=${cam.z.toFixed(2)}  frame ${String(f).padStart(3, '0')}`, m + 50, H - m - 14);
+  ctx.globalAlpha = Math.floor(t * 2) % 2 ? a * 1.6 : a * 0.4;
+  ctx.fillStyle = ORANGE; ctx.beginPath(); ctx.arc(m + 30, m + 20, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawFinish(t) {
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, W * 0.7);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.75)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.globalAlpha = 0.06; ctx.globalCompositeOperation = 'overlay';
+  const f = Math.floor(t * FPS);
+  ctx.translate(-hash(f) * 256, -hash(f + 0.5) * 256);
+  ctx.fillStyle = ctx.createPattern(grain, 'repeat'); ctx.fillRect(0, 0, W + 256, H + 256);
+  ctx.restore();
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 1);
+  // flash on enter, fade in/out
+  const flash = Math.sin(range(t, ENTER_T, ENTER_T + 0.25) * Math.PI);
+  if (flash > 0) { ctx.fillStyle = `rgba(${ORANGE_RGB},${flash * 0.12})`; ctx.fillRect(0, 0, W, H); }
+  const black = 1 - range(t, 0, 0.5) + range(t, DURATION - 0.7, DURATION);
+  if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${clamp(black)})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// ---------- frame ----------
+function renderFrame(t) {
+  t = clamp(t, 0, DURATION);
+  const cam = camAt(t);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  drawBackground(cam);
+  drawGrid(cam, t);
+  drawProps(cam, t);
+  blitPanel(cam, t);
+  drawSlams(t);
+  drawHero(cam, t);
+  drawHUD(cam, t);
+  drawFinish(t);
+}
+
+// ---------- boot ----------
+window.ready = Promise.all([
+  document.fonts.load(`bold 56px ${MONO}`), document.fonts.load(`bold 128px ${SANS}`),
+]).catch(() => {}).then(() => { layoutPrompt(); renderFrame(0); });
+window.renderFrame = renderFrame;
+window.DURATION = DURATION; window.FPS = FPS;
+
+if (new URLSearchParams(location.search).has('render')) {
+  document.body.classList.add('render');
+} else {
+  let t = 0, playing = true, last = performance.now();
+  window.ready.then(() => requestAnimationFrame(function loop(now) {
+    if (playing) t = (t + (now - last) / 1000) % DURATION;
+    last = now;
+    renderFrame(t);
+    requestAnimationFrame(loop);
+  }));
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') playing = !playing;
+    if (e.code === 'ArrowRight') t = Math.min(DURATION, t + 1 / FPS * (e.shiftKey ? 30 : 1));
+    if (e.code === 'ArrowLeft') t = Math.max(0, t - 1 / FPS * (e.shiftKey ? 30 : 1));
+    if (e.key === 'r') t = 0;
+  });
+}
+</script>
+</body>
+</html>
