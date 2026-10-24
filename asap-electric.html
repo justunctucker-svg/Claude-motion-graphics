@@ -1076,6 +1076,10 @@ function renderFrame(t) {
   drawFinish(t, flash);
 }
 </script>
+<script>
+// ?sfx=retro loads the 8-bit sound palette before the soundtrack script
+if (new URLSearchParams(location.search).get('sfx') === 'retro') document.write('<script src="asap-sfx-retro.js"><\/script>');
+</script>
 <script src="asap-audio.js"></script>
 <script>
 // ---------- boot ----------

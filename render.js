@@ -1,6 +1,6 @@
 // Renders a scene page frame-by-frame with headless Chromium and pipes it into ffmpeg.
 // If the page exposes window.renderAudioWav(), its soundtrack is muxed in too.
-// Usage: node render.js [page.html] [out.mp4] [--fps 30] [--preview]
+// Usage: node render.js [page.html] [out.mp4] [--fps 30] [--preview] [--query key=value]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -12,13 +12,15 @@ const out = args.find(a => a.endsWith('.mp4')) || `out/${path.basename(pageFile,
 const fpsArg = args.indexOf('--fps');
 const fps = fpsArg >= 0 ? Number(args[fpsArg + 1]) : 30;
 const preview = args.includes('--preview');
+const queryArg = args.indexOf('--query');
+const query = queryArg >= 0 ? '&' + args[queryArg + 1] : '';
 
 (async () => {
   fs.mkdirSync(path.dirname(out), { recursive: true });
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
   const page = await browser.newPage();
   page.on('pageerror', e => console.error('page error:', e.message));
-  await page.goto('file://' + path.resolve(__dirname, pageFile) + '?render');
+  await page.goto('file://' + path.resolve(__dirname, pageFile) + '?render' + query);
   await page.evaluate(() => window.ready);
   const { width, height, duration, hasAudio } = await page.evaluate(() => {
     const c = document.querySelector('canvas');

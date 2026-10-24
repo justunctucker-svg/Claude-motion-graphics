@@ -4,7 +4,8 @@
   "scripts": {
     "render": "node render.js index.html out/motion.mp4",
     "render:asap": "node render.js asap-electric.html out/asap-electric.mp4",
-    "preview:asap": "node render.js asap-electric.html out/asap-preview.mp4 --preview"
+    "preview:asap": "node render.js asap-electric.html out/asap-preview.mp4 --preview",
+    "render:asap-retro": "node render.js asap-electric.html out/asap-electric-retro.mp4 --query sfx=retro"
   },
   "devDependencies": {
     "playwright": "^1.48.0"

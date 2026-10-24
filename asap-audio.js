@@ -53,46 +53,52 @@ async function renderSoundtrack(sr = 48000) {
   }
 
   // ---- sound palette ----
-  const click = (t, pan = 0, vol = 1) => {
+  let click = (t, pan = 0, vol = 1) => {
     noise(t, { dur: 0.03, gain: 0.22 * vol, type: 'highpass', f0: 2500, q: 0.7, pan, wet: 0.04 });
     tone(t, { f0: 190, f1: 90, dur: 0.045, gain: 0.12 * vol, pan, wet: 0 });
   };
-  const thunder = (t, vol = 1) => {
+  let thunder = (t, vol = 1) => {
     noise(t, { dur: 0.22, gain: 0.8 * vol, type: 'highpass', f0: 1800, q: 0.5, wet: 0.3 });
     noise(t + 0.03, { dur: 2.8, gain: 0.75 * vol, type: 'lowpass', f0: 900, f1: 70, q: 0.7, attack: 0.06, wet: 0.45 });
     tone(t, { f0: 70, f1: 32, dur: 1.6, gain: 0.5 * vol, attack: 0.01, wet: 0.2 });
   };
-  const zap = (t, vol = 1, pan = 0) => {
+  let zap = (t, vol = 1, pan = 0) => {
     tone(t, { type: 'sawtooth', f0: 3200, f1: 140, dur: 0.28, gain: 0.12 * vol, pan, wet: 0.2 });
     tone(t + 0.02, { type: 'square', f0: 1700, f1: 90, dur: 0.22, gain: 0.06 * vol, pan, wet: 0.2 });
     noise(t, { dur: 0.2, gain: 0.25 * vol, type: 'highpass', f0: 4500, pan, wet: 0.2 });
   };
-  const whoosh = (t, dur, vol = 1) => noise(t, { dur, gain: 0.45 * vol, f0: 250, f1: 3800, q: 1.4, attack: dur * 0.75, wet: 0.3 });
-  const impact = (t, vol = 1) => {
+  let whoosh = (t, dur, vol = 1) => noise(t, { dur, gain: 0.45 * vol, f0: 250, f1: 3800, q: 1.4, attack: dur * 0.75, wet: 0.3 });
+  let impact = (t, vol = 1) => {
     tone(t, { f0: 150, f1: 38, dur: 0.9, gain: 0.85 * vol, glide: 0.35, wet: 0.3 });
     noise(t, { dur: 0.45, gain: 0.45 * vol, type: 'lowpass', f0: 3200, f1: 180, wet: 0.35 });
     noise(t, { dur: 0.05, gain: 0.3 * vol, type: 'highpass', f0: 3000, wet: 0.1 });
   };
-  const riser = (t0, t1) => {
+  let riser = (t0, t1) => {
     noise(t0, { dur: t1 - t0, gain: 0.3, f0: 400, f1: 6000, q: 2, attack: t1 - t0 - 0.03, wet: 0.3 });
     tone(t0, { type: 'sawtooth', f0: 110, f1: 880, dur: t1 - t0, gain: 0.035, attack: t1 - t0 - 0.03, wet: 0.3 });
   };
-  const pop = (t, f, vol = 1, pan = 0) => {
+  let pop = (t, f, vol = 1, pan = 0) => {
     tone(t, { f0: f, f1: f * 0.55, dur: 0.12, gain: 0.3 * vol, glide: 0.08, pan, wet: 0.15 });
     tone(t, { type: 'triangle', f0: f * 2, dur: 0.05, gain: 0.06 * vol, pan, wet: 0.1 });
   };
-  const ding = (t, f, vol = 1, pan = 0) => {
+  let ding = (t, f, vol = 1, pan = 0) => {
     tone(t, { f0: f, dur: 1.0, gain: 0.22 * vol, pan, wet: 0.45 });
     tone(t, { f0: f * 2.01, dur: 0.5, gain: 0.07 * vol, pan, wet: 0.45 });
     tone(t, { f0: f * 3.02, dur: 0.25, gain: 0.035 * vol, pan, wet: 0.45 });
   };
-  const sparkle = (t, n = 12) => {
+  let sparkle = (t, n = 12) => {
     for (let i = 0; i < n; i++) tone(t + i * 0.035, { f0: 3000 + r() * 4000, dur: 0.15, gain: 0.04, pan: r() * 2 - 1, wet: 0.5 });
   };
-  const errBeep = t => {
+  let errBeep = t => {
     tone(t, { type: 'square', f0: 440, dur: 0.09, gain: 0.05, wet: 0.1 });
     tone(t + 0.1, { type: 'square', f0: 330, dur: 0.13, gain: 0.05, wet: 0.1 });
   };
+
+  let fanfare = (t, vol = 1, notes = [1046.5, 1318.5, 1568, 2093]) =>
+    notes.forEach((f, i) => ding(t + i * 0.07, f, vol, (i - (notes.length - 1) / 2) * 0.3));
+  // ?sfx=retro swaps in the 8-bit palette from asap-sfx-retro.js
+  if (window.RETRO_SFX) ({ click, thunder, zap, whoosh, impact, riser, pop, ding, sparkle, errBeep, fanfare } =
+    { click, thunder, zap, whoosh, impact, riser, pop, ding, sparkle, errBeep, fanfare, ...window.RETRO_SFX({ ac, sr, r, out, envelope, tone }) });
 
   // ---- music bed: low pad + light pulse once the logo hits ----
   [55, 82.41, 110, 164.81].forEach((f, i) => {
@@ -138,7 +144,7 @@ async function renderSoundtrack(sr = 48000) {
   // ---- scene 4: Nextdoor badge ----
   whoosh(T.badge - 0.05, 0.7, 0.8);
   impact(T.badge + 0.7, 0.55);
-  [1046.5, 1318.5, 1568, 2093].forEach((f, i) => ding(T.badge + 0.7 + i * 0.07, f, 0.9, (i - 1.5) * 0.3));
+  fanfare(T.badge + 0.7, 0.9);
   sparkle(T.badge + 1.1, 14);
   for (let i = 0; i < 26; i++) noise(T.badge + 0.75 + r() * 1.2, { dur: 0.02, gain: 0.05 + r() * 0.05, type: 'highpass', f0: 5000, pan: r() * 2 - 1, wet: 0.2 });
 
@@ -167,7 +173,7 @@ async function renderSoundtrack(sr = 48000) {
   impact(digitLand(0), 0.45);
   ding(digitLand(11) + 0.15, 1568, 0.8);
   whoosh(T.cta + 0.95, 0.35, 0.4);
-  [1046.5, 1318.5, 1568].forEach((f, i) => ding(T.cta + 1.75 + i * 0.07, f, 0.6));
+  fanfare(T.cta + 1.75, 0.6, [1046.5, 1318.5, 1568]);
   sparkle(T.cta + 2.2, 10);
 
   return ac.startRendering();

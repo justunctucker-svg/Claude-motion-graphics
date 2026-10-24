@@ -47,3 +47,7 @@ npm run render:asap     # → out/asap-electric.mp4 (with audio)
 ```
 
 `assets/man.png` and `assets/van.png` are cutouts taken from the company's flyers (background removed with rembg).
+
+### Retro arcade sound version
+
+Add `?sfx=retro` to the page (or run `npm run render:asap-retro`) and the same video plays with an 8-bit arcade sound set from `asap-sfx-retro.js`. Typing becomes chomp blips, lightning becomes a crunchy explosion and laser zap, fly-throughs become diving sirens, slams become stepped booms, pops become coin pickups, checks become power-ups, and the badge and phone number get a short level-clear fanfare. The sounds are original chip-style synthesis inspired by early-'80s arcade cabinets. No game audio is sampled or copied.
