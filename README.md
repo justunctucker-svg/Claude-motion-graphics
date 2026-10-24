@@ -51,3 +51,17 @@ npm run render:asap     # → out/asap-electric.mp4 (with audio)
 ### Retro arcade sound version
 
 Add `?sfx=retro` to the page (or run `npm run render:asap-retro`) and the same video plays with an 8-bit arcade sound set from `asap-sfx-retro.js`. Typing becomes chomp blips, lightning becomes a crunchy explosion and laser zap, fly-throughs become diving sirens, slams become stepped booms, pops become coin pickups, checks become power-ups, and the badge and phone number get a short level-clear fanfare. The sounds are original chip-style synthesis inspired by early-'80s arcade cabinets. No game audio is sampled or copied.
+
+### Senior-friendly version
+
+`asap-electric-friendly.html` + `asap-audio-friendly.js`: a calmer 39-second cut aimed at older homeowners. It reuses the logo, badge, icons, owner and van.
+
+- Big upright bold type (body text 44px and up, headlines around 80px), high contrast, and one idea per screen.
+- Slow fades and slides. No lightning flashes, flicker, glitch letters, camera shake or speed lines.
+- Plain-language problem cards instead of the "diagnostics" terminal.
+- **CALL 941-416-7599** stays on screen from 2.5s until the final call-to-action, which holds for 7s.
+- A warm electric-piano bed (C–G–Am–F at 76 bpm) with soft marimba and bell cues, rolled off above 6 kHz with no booms or hiss.
+
+```bash
+npm run render:asap-friendly   # → out/asap-electric-friendly.mp4
+```
