@@ -149,6 +149,17 @@ async function renderSoundtrack(sr = 48000) {
   // ---- scene 6: trust checklist ----
   [659.3, 784, 880, 1046.5].forEach((f, i) => { pop(checkTime(i), 300, 0.5); ding(checkTime(i) + 0.25, f, 0.8); });
 
+  // ---- the team: van pulls in, owner scans in ----
+  const vt = T.trust + 0.15, vs = T.trust + VAN_STOP;
+  noise(vt, { dur: vs - vt + 0.1, gain: 0.35, f0: 300, f1: 1400, q: 1, attack: (vs - vt) * 0.6, wet: 0.2 });
+  tone(vt, { type: 'sawtooth', f0: 70, f1: 45, dur: vs - vt + 0.15, gain: 0.07, attack: 0.1, wet: 0.1 });
+  noise(vs - 0.22, { dur: 0.3, gain: 0.22, f0: 2600, f1: 1900, q: 8, attack: 0.05, wet: 0.2 });   // tire chirp
+  impact(vs, 0.45);
+  tone(T.trust + MAN_REVEAL[0], { f0: 300, f1: 1200, dur: MAN_REVEAL[1] - MAN_REVEAL[0], gain: 0.06, attack: 0.4, wet: 0.4 });
+  sparkle(T.trust + MAN_REVEAL[1] - 0.05, 8);
+  [0, 1, 2].forEach(i => pop(T.trust + 1.27 + i * 0.15, 700 + i * 120, 0.6));
+  noise(T.trust + 1.75, { dur: 0.3, gain: 0.25, f0: 1500, f1: 4000, q: 2, attack: 0.1, wet: 0.2 });
+
   // ---- scene 7: CTA ----
   noise(T.cta + 0.28, { dur: 0.35, gain: 0.45, f0: 700, f1: 2600, q: 1.2, attack: 0.1, wet: 0.2 });
   for (let tt = T.cta + 0.3; tt < digitLand(11); tt += 1 / 30) tone(tt, { type: 'triangle', f0: 2200, dur: 0.018, gain: 0.025, wet: 0 });
