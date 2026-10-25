@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Element Carousel</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; display: block; }
+  #hint { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center; color: #fff6;
+          font: 12px monospace; pointer-events: none; }
+  body.render #hint { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1920" height="1080"></canvas>
+<div id="hint">click: sound on · space: pause · ←/→: scrub · r: restart</div>
+<script>
+// Element carousel: a cursor clicks through four glowing cards, each with its own effect.
+// One 14s seamless loop, played twice. Everything is a pure function of time.
+const W = 1920, H = 1080, FPS = 30, LOOP = 14, DURATION = 28;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const stage = document.createElement('canvas'); stage.width = W; stage.height = H;
+const sctx = stage.getContext('2d');
+
+const SANS = '"Inter Display", "Inter", system-ui, sans-serif';
+const MONO = '"DejaVu Sans Mono", Menlo, Consolas, monospace';
+
+// ---------- helpers ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const range = (t, a, b) => clamp((t - a) / (b - a));
+const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const easeInOutCubic = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const easeOutBack = k => { const c = 1.4; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); };
+const mod = (a, n) => ((a % n) + n) % n;
+function hash(n) { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+// ---------- cards ----------
+const OPTIONS = [
+  { name: 'Ember', sub: 'FIRE · COURAGE', icon: 'fire', glow: '255,80,40', tint: '#5c1014',
+    blobs: [['#ff4d7a', 0.25, 0.2], ['#ff9a3c', 0.8, 0.45], ['#9bd47a', 0.85, 0.85], ['#d81b60', 0.2, 0.8]] },
+  { name: 'Solar', sub: 'SUN · VITALITY', icon: 'sun', glow: '255,190,60', tint: '#4d1210',
+    blobs: [['#ffb36b', 0.2, 0.25], ['#f6e27a', 0.8, 0.35], ['#b5e07a', 0.75, 0.85], ['#ff8a6a', 0.25, 0.8]] },
+  { name: 'Breeze', sub: 'AIR · CLARITY', icon: 'wind', glow: '50,220,180', tint: '#0f3d26',
+    blobs: [['#3ad6b0', 0.2, 0.25], ['#b6f0d8', 0.8, 0.3], ['#1fa29a', 0.8, 0.85], ['#7fe3c4', 0.2, 0.8]] },
+  { name: 'Bloom', sub: 'HEART · WARMTH', icon: 'flower', glow: '255,70,150', tint: '#4d0d1c',
+    blobs: [['#ff5c98', 0.2, 0.2], ['#b04de0', 0.8, 0.4], ['#ff9cc0', 0.75, 0.85], ['#8a3bd1', 0.2, 0.8]] },
+];
+const CW = 250, CH = 420, CY = 500, GAP = 500, FLOOR = CY + CH / 2 + 45;
+const SEG = LOOP / OPTIONS.length, SLIDE = 0.75;          // 3.5s per option, 0.75s glide
+
+// carousel position: card k sits centered when p === k
+function posAt(t) {
+  const s = Math.floor(t / SEG), local = t - s * SEG;
+  return s + easeInOutCubic(range(local, SEG - SLIDE, SEG));
+}
+const arrival = k => k * SEG;           // when card k lands in the center (its effect starts)
+const clickTime = s => s * SEG + SEG - SLIDE - 0.12;
+
+function pillPath(c, x, y, w, h) {
+  c.beginPath(); c.roundRect(x - w / 2, y - h / 2, w, h, w / 2);
+}
+
+function drawIcon(c, kind, x, y, s) {
+  c.save();
+  c.translate(x, y); c.scale(s, s);
+  c.strokeStyle = '#fff'; c.lineWidth = 2.6; c.lineCap = 'round'; c.lineJoin = 'round';
+  c.beginPath();
+  if (kind === 'fire') {
+    c.moveTo(0, -30); c.bezierCurveTo(18, -12, 22, 2, 16, 14); c.bezierCurveTo(10, 24, -10, 24, -16, 14);
+    c.bezierCurveTo(-22, 2, -12, -8, -6, -14); c.bezierCurveTo(-4, -4, 2, -2, 0, -30);
+    c.moveTo(0, 2); c.bezierCurveTo(8, 8, 6, 18, 0, 18); c.bezierCurveTo(-6, 18, -8, 10, 0, 2);
+    c.moveTo(-24, 24); c.lineTo(24, 34); c.moveTo(24, 24); c.lineTo(-24, 34);
+  } else if (kind === 'sun') {
+    c.arc(0, 0, 13, 0, Math.PI * 2);
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      c.moveTo(Math.cos(a) * 21, Math.sin(a) * 21); c.lineTo(Math.cos(a) * 30, Math.sin(a) * 30);
+    }
+  } else if (kind === 'wind') {
+    c.moveTo(-30, -12); c.lineTo(10, -12); c.bezierCurveTo(22, -12, 22, -28, 10, -26);
+    c.moveTo(-30, 0); c.lineTo(22, 0); c.bezierCurveTo(34, 0, 34, 16, 22, 14);
+    c.moveTo(-30, 12); c.lineTo(4, 12); c.bezierCurveTo(16, 12, 16, 28, 4, 26);
+  } else {
+    for (let i = 0; i < 6; i++) {
+      c.save(); c.rotate(i * Math.PI / 3);
+      c.moveTo(0, -6); c.bezierCurveTo(9, -14, 8, -28, 0, -32); c.bezierCurveTo(-8, -28, -9, -14, 0, -6);
+      c.restore();
+    }
+    c.moveTo(6, 0); c.arc(0, 0, 6, 0, Math.PI * 2);
+  }
+  c.stroke();
+  c.restore();
+}
+
+function drawCard(c, opt, idx, x, y, scale, a) {
+  c.save();
+  c.translate(x, y); c.scale(scale, scale);
+  // dark resting state
+  pillPath(c, 0, 0, CW, CH);
+  const dark = c.createLinearGradient(0, -CH / 2, 0, CH / 2);
+  dark.addColorStop(0, '#08080a'); dark.addColorStop(0.55, '#0c0b0d'); dark.addColorStop(1, opt.tint);
+  c.fillStyle = dark; c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.08)'; c.lineWidth = 1.5; c.stroke();
+  // vivid mesh gradient when active
+  if (a > 0) {
+    c.save();
+    c.globalAlpha = a;
+    pillPath(c, 0, 0, CW, CH); c.clip();
+    c.fillStyle = opt.blobs[0][0]; c.fillRect(-CW, -CH, CW * 2, CH * 2);
+    opt.blobs.forEach(([col, bx, by]) => {
+      const gx = -CW / 2 + bx * CW, gy = -CH / 2 + by * CH;
+      const g = c.createRadialGradient(gx, gy, 0, gx, gy, CW * 0.95);
+      g.addColorStop(0, col); g.addColorStop(1, col + '00');
+      c.fillStyle = g; c.fillRect(-CW, -CH, CW * 2, CH * 2);
+    });
+    const sheen = c.createLinearGradient(-CW / 2, -CH / 2, CW / 2, CH / 2);
+    sheen.addColorStop(0, 'rgba(255,255,255,0.25)'); sheen.addColorStop(0.5, 'rgba(255,255,255,0)');
+    c.fillStyle = sheen; c.fillRect(-CW, -CH, CW * 2, CH * 2);
+    c.restore();
+  }
+  // labels
+  c.textAlign = 'center';
+  c.fillStyle = `rgba(255,255,255,${0.45 + 0.3 * a})`;
+  c.font = `500 12px ${MONO}`; c.fillText(String(idx + 1).padStart(2, '0'), 0, -CH / 2 + 34);
+  drawIcon(c, opt.icon, 0, -6, 1.15);
+  c.fillStyle = '#fff'; c.font = `600 30px ${SANS}`; c.fillText(opt.name, 0, CH / 2 - 92);
+  c.fillStyle = 'rgba(255,255,255,0.6)'; c.font = `500 11px ${MONO}`;
+  c.letterSpacing = '2px'; c.fillText(opt.sub, 0, CH / 2 - 68); c.letterSpacing = '0px';
+  c.restore();
+}
+
+// ---------- effects ----------
+// Each effect draws in two layers around the card: 'back' (behind it) and 'front' (over it).
+// e: seconds since the card landed; k: 0..1 how "on" the effect is.
+function glow(c, x, y, rgb, alpha, radius) {
+  const g = c.createRadialGradient(x, y, 40, x, y, radius);
+  g.addColorStop(0, `rgba(${rgb},${alpha})`); g.addColorStop(1, `rgba(${rgb},0)`);
+  c.fillStyle = g; c.fillRect(x - radius, y - radius, radius * 2, radius * 2);
+}
+
+function ember(c, x, y, e, k, t, layer) {
+  if (k <= 0) return;
+  const ignite = easeOutCubic(range(e, 0, 0.45));
+  const flare = 1 + 0.5 * Math.max(0, 1 - e / 0.6);
+  c.save();
+  c.globalCompositeOperation = 'lighter';
+  if (layer === 'back') {
+    glow(c, x, y - CH * 0.3, '255,70,20', 0.45 * k * ignite, 420);
+    c.restore();
+    return;
+  }
+  const R = CW / 2;
+  for (let i = 0; i < 150; i++) {
+    const L = 0.55 + hash(i * 1.7) * 0.45;
+    const age = mod(t + hash(i) * L, L), u = age / L;
+    // spawn along the top arc and a little way down the sides
+    const th = -Math.PI * (-0.08 + 1.16 * hash(i * 2.3));
+    const side = th > 0 || th < -Math.PI;
+    const ox = x + Math.cos(th) * (R - 4);
+    const oy = side ? y - CH / 2 + R + Math.abs(Math.sin(th)) * 140 : y - CH / 2 + R + Math.sin(th) * (R - 4);
+    const rise = (110 + hash(i * 9.1) * 170) * ignite * flare;
+    const px = ox + Math.sin(u * 7 + i) * 10 * u + Math.cos(th) * 18 * u;
+    const py = oy - u * rise;
+    const r = (1 - u * 0.85) * (20 + hash(i * 4.4) * 26) * (0.5 + 0.5 * ignite);
+    const al = Math.sin(Math.min(1, u * 4 + 0.15) * Math.PI / 2) * (1 - u) * 0.5 * k;
+    const g = c.createRadialGradient(px, py, 0, px, py, r);
+    g.addColorStop(0, `rgba(255,${235 - u * 150},${170 - u * 150},${al})`);
+    g.addColorStop(0.4, `rgba(255,${120 - u * 80},20,${al * 0.75})`);
+    g.addColorStop(1, 'rgba(160,10,0,0)');
+    c.save();
+    c.translate(px, py); c.scale(0.8, 1.7);
+    c.fillStyle = g;
+    c.translate(-px, -py);
+    c.beginPath(); c.arc(px, py, r, 0, Math.PI * 2); c.fill();
+    c.restore();
+  }
+  // hot rim where the flames meet the card
+  c.save();
+  c.translate(x, y);
+  pillPath(c, 0, 0, CW + 4, CH + 4);
+  c.strokeStyle = `rgba(255,120,40,${0.8 * k * ignite})`; c.lineWidth = 5;
+  c.shadowColor = 'rgba(255,60,0,1)'; c.shadowBlur = 25; c.stroke();
+  c.restore();
+  for (let i = 0; i < 36; i++) {                                  // sparks
+    const L = 1.3, u = mod(t * 1.1 + hash(i * 8.8) * L, L) / L;
+    const px = x + (hash(i * 6.6) - 0.5) * CW * 1.3 + Math.sin(t * 3 + i) * 12;
+    const py = y - CH * 0.3 - u * 360;
+    c.fillStyle = `rgba(255,${230 - u * 100},160,${(1 - u) * k * ignite})`;
+    c.fillRect(px, py, 3, 3);
+  }
+  c.restore();
+}
+
+function solar(c, x, y, e, k, t, layer) {
+  if (k <= 0) return;
+  const ring = easeOutCubic(range(e, 0, 0.55)), burst = easeOutBack(range(e, 0.25, 0.9));
+  c.save();
+  if (layer === 'back') {
+    c.globalCompositeOperation = 'lighter';
+    glow(c, x, y, '255,190,70', 0.5 * k * burst, 560);
+    for (let i = 0; i < 180; i++) {                               // rays streaming out from behind the card
+      const a = (i / 180) * Math.PI * 2 + t * 0.05;
+      const ex = Math.cos(a), ey = Math.sin(a);
+      const sx = x + ex * CW * 0.5, sy = y + ey * CH * 0.5;
+      const len = (70 + hash(i * 3.7) * 240) * burst * (0.8 + 0.2 * Math.sin(t * 4 + i * 1.3));
+      const lg = c.createLinearGradient(sx, sy, sx + ex * len, sy + ey * len);
+      lg.addColorStop(0, `rgba(255,235,150,${0.75 * k})`); lg.addColorStop(1, 'rgba(255,170,40,0)');
+      c.strokeStyle = lg; c.lineWidth = 1 + hash(i) * 2.5;
+      c.beginPath(); c.moveTo(sx, sy); c.lineTo(sx + ex * len, sy + ey * len); c.stroke();
+    }
+    if (e < 1) {                                                  // sparks spiraling in as the ring forms
+      for (let i = 0; i < 40; i++) {
+        const u = range(e, hash(i) * 0.3, 0.6 + hash(i) * 0.3);
+        if (u <= 0 || u >= 1) continue;
+        const a = hash(i * 2.2) * Math.PI * 2 + u * 3, rad = lerp(340, 150, easeOutCubic(u));
+        c.fillStyle = `rgba(255,220,140,${(1 - u) * k})`;
+        c.fillRect(x + Math.cos(a) * rad * 0.85, y + Math.sin(a) * rad * 1.3, 3, 3);
+      }
+    }
+  } else {                                                        // bright rim that draws itself on
+    c.translate(x, y); c.scale(1.03, 1.03);
+    pillPath(c, 0, 0, CW, CH);
+    c.setLineDash([1300 * ring, 1400]);
+    c.strokeStyle = `rgba(255,250,225,${k})`; c.lineWidth = 7;
+    c.shadowColor = 'rgba(255,180,50,1)'; c.shadowBlur = 35; c.stroke();
+  }
+  c.restore();
+}
+
+function breeze(c, x, y, e, k, t, layer) {
+  if (k <= 0) return;
+  const form = easeOutCubic(range(e, 0, 0.9));
+  c.save();
+  c.globalCompositeOperation = 'lighter';
+  if (layer === 'back') glow(c, x, y, '40,220,180', 0.32 * k * form, 440);
+  c.lineCap = 'round';
+  for (let i = 0; i < 50; i++) {
+    if ((i % 3 === 0) !== (layer === 'front')) continue;          // a third of the streaks pass in front
+    const rx = (CW * 0.62 + hash(i) * 120) * lerp(1.7, 1, form), ry = (CH * 0.58 + hash(i * 2.1) * 110) * lerp(1.4, 1, form);
+    const speed = 1.4 + hash(i * 3.3) * 1.4, arc = 0.5 + hash(i * 4.4) * 0.9;
+    const tilt = (hash(i * 5.5) - 0.5) * 0.5;
+    const phi0 = hash(i * 6.6) * Math.PI * 2 + t * speed;
+    const N = 14;
+    for (let sg = 0; sg < N; sg++) {
+      const pt = q => {
+        const px = Math.cos(q) * rx, py = Math.sin(q) * ry;
+        return [x + px * Math.cos(tilt) - py * Math.sin(tilt), y + px * Math.sin(tilt) + py * Math.cos(tilt)];
+      };
+      const [ax, ay] = pt(phi0 - arc * sg / N), [bx, by] = pt(phi0 - arc * (sg + 1) / N);
+      const al = (1 - sg / N) * 0.75 * k * form;
+      c.strokeStyle = i % 4 ? `rgba(70,230,190,${al})` : `rgba(215,255,242,${al})`;
+      c.lineWidth = (1 - sg / N) * (2 + hash(i * 7.7) * 3);
+      c.beginPath(); c.moveTo(ax, ay); c.lineTo(bx, by); c.stroke();
+    }
+  }
+  c.restore();
+  if (layer === 'front') {
+    c.save();
+    c.translate(x, y); c.scale(1.02, 1.02);
+    pillPath(c, 0, 0, CW, CH);
+    c.strokeStyle = `rgba(170,255,228,${0.7 * k * form})`; c.lineWidth = 3;
+    c.shadowColor = 'rgba(40,220,180,1)'; c.shadowBlur = 30; c.stroke();
+    c.restore();
+  }
+}
+
+// lotus petals unfold around the card: a big fan behind it and a low ring in front
+const PETALS = [
+  ...[-1.2, -0.8, -0.4, 0, 0.4, 0.8, 1.2].map((a, i) => ({ a, len: 330 - Math.abs(a) * 50, w: 130, layer: 'back', d: Math.abs(a) * 0.12 })),
+  ...[-1.75, -1.4, 1.4, 1.75].map((a, i) => ({ a, len: 250, w: 110, layer: 'front', d: 0.2 + (i % 2) * 0.06 })),
+];
+function petal(c, len, w) {
+  c.beginPath();
+  c.moveTo(0, 0);
+  c.bezierCurveTo(w * 0.75, -len * 0.25, w * 0.55, -len * 0.75, 0, -len);
+  c.bezierCurveTo(-w * 0.55, -len * 0.75, -w * 0.75, -len * 0.25, 0, 0);
+}
+function bloom(c, x, y, e, k, t, layer) {
+  if (k <= 0) return;
+  const bx = x, by = y + CH * 0.28;
+  c.save();
+  if (layer === 'back') {
+    c.globalCompositeOperation = 'lighter';
+    glow(c, x, y, '255,60,150', 0.4 * k * range(e, 0, 0.6), 600);
+    c.globalCompositeOperation = 'source-over';
+  }
+  PETALS.filter(p => p.layer === layer).forEach((p, i) => {
+    const o = easeOutBack(range(e, p.d, p.d + 0.75));
+    if (o <= 0) return;
+    const ang = p.a * o + Math.sin(t * 1.4 + i) * 0.025;
+    c.save();
+    c.translate(bx, by); c.rotate(ang); c.scale(0.35 + 0.65 * o, 0.35 + 0.65 * o);
+    c.globalAlpha = k * clamp(o * 1.5) * (layer === 'front' ? 0.92 : 1);
+    petal(c, p.len, p.w);
+    const pg = c.createLinearGradient(0, 0, 0, -p.len);
+    pg.addColorStop(0, '#ffe0ec'); pg.addColorStop(0.4, '#ff74ae'); pg.addColorStop(1, '#ff2f87');
+    c.fillStyle = pg;
+    c.shadowColor = 'rgba(255,60,150,0.9)'; c.shadowBlur = 35; c.fill();
+    c.shadowBlur = 0;
+    c.strokeStyle = 'rgba(255,242,250,0.9)'; c.lineWidth = 3; c.stroke();
+    c.beginPath(); c.moveTo(0, -12); c.lineTo(0, -p.len * 0.82);
+    c.strokeStyle = 'rgba(255,255,255,0.35)'; c.lineWidth = 1.5; c.stroke();
+    c.restore();
+  });
+  if (layer === 'front') {                                        // drifting pollen
+    c.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 26; i++) {
+      const L = 2.4, u = mod(t + hash(i * 3.9) * L, L) / L;
+      const px = x + (hash(i * 1.9) - 0.5) * 460 + Math.sin(t + i) * 20, py = y + 120 - u * 440;
+      c.fillStyle = `rgba(255,205,232,${Math.sin(u * Math.PI) * 0.8 * k * range(e, 0.4, 1)})`;
+      c.beginPath(); c.arc(px, py, 2.5, 0, Math.PI * 2); c.fill();
+    }
+  }
+  c.restore();
+}
+
+// ---------- cursor ----------
+function cursorAt(t) {
+  const s = Math.floor(t / SEG), local = t - s * SEG;
+  const C = [W / 2 + GAP - 70, CY + 10];
+  const r = rng(mod(s, 4) * 97 + 13); r();
+  const Wp = [W / 2 + 160 + r() * 260, CY + 120 + r() * 140];
+  const out = easeInOutCubic(range(local, 0.5, 1.4)), back = easeInOutCubic(range(local, 1.7, SEG - SLIDE - 0.2));
+  const k = out * (1 - back);
+  return [lerp(C[0], Wp[0], k), lerp(C[1], Wp[1], k)];
+}
+function drawCursor(t) {
+  const [x, y] = cursorAt(t);
+  const s = Math.floor(t / SEG), dc = t - clickTime(s);
+  const press = dc > 0 && dc < 0.18 ? 0.82 : 1;
+  if (dc > 0 && dc < 0.45) {
+    const u = dc / 0.45;
+    ctx.strokeStyle = `rgba(255,255,255,${0.6 * (1 - u)})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 8 + 30 * easeOutCubic(u), 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(press * 1.1, press * 1.1);
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(0, 26); ctx.lineTo(6.5, 20); ctx.lineTo(11, 30); ctx.lineTo(15, 28); ctx.lineTo(10.5, 18.5); ctx.lineTo(19, 18.5); ctx.closePath();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 6; ctx.shadowOffsetY = 2;
+  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- frame ----------
+const EFFECTS = { Ember: ember, Solar: solar, Breeze: breeze, Bloom: bloom };
+const grain = document.createElement('canvas'); grain.width = grain.height = 256;
+(() => {
+  const g = grain.getContext('2d'), img = g.createImageData(256, 256);
+  for (let i = 0; i < img.data.length; i += 4) { const v = hash(i * 0.37) * 255; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+  g.putImageData(img, 0, 0);
+})();
+
+function renderFrame(tAbs) {
+  const t = mod(clamp(tAbs, 0, DURATION), LOOP);
+  const p = posAt(t);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#060507'; ctx.fillRect(0, 0, W, H);
+
+  const cards = [];
+  for (let k = Math.floor(p) - 2; k <= Math.floor(p) + 3; k++) {
+    const d = k - p, a = clamp(1 - Math.abs(d));
+    const opt = OPTIONS[mod(k, 4)];
+    // effect clock: since this card last landed (wraps with the loop)
+    const e = t - arrival(k);
+    const s = Math.floor(t / SEG), dc = t - clickTime(s);
+    const pressed = Math.abs(d - 1) < 0.01 && dc > 0 && dc < 0.25 ? 1 - 0.04 * Math.sin(dc / 0.25 * Math.PI) : 1;
+    cards.push({ k, d, a, opt, e, x: W / 2 + d * GAP, scale: lerp(0.94, 1.04, a) * pressed });
+  }
+
+  // ambient colored glow behind the active card
+  cards.forEach(({ a, opt, x }) => {
+    if (a <= 0) return;
+    const g = ctx.createRadialGradient(x, CY, 50, x, CY, 900);
+    g.addColorStop(0, `rgba(${opt.glow},${0.22 * a})`); g.addColorStop(1, `rgba(${opt.glow},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  });
+
+  // stage: cards + effects, drawn once and mirrored for the floor reflection
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, W, H);
+  const on = c => (c.e >= 0 ? c.a : 0);
+  cards.forEach(c => EFFECTS[c.opt.name](sctx, c.x, CY, c.e, on(c), t, 'back'));
+  cards.forEach(c => drawCard(sctx, c.opt, OPTIONS.indexOf(c.opt), c.x, CY, c.scale, c.a));
+  cards.forEach(c => EFFECTS[c.opt.name](sctx, c.x, CY, c.e, on(c), t, 'front'));
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, W, FLOOR); ctx.clip();
+  ctx.drawImage(stage, 0, 0);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(0, FLOOR * 2); ctx.scale(1, -1);
+  ctx.globalAlpha = 0.28;
+  ctx.beginPath(); ctx.rect(0, 0, W, FLOOR); ctx.clip();
+  ctx.drawImage(stage, 0, 0);
+  ctx.restore();
+  const fade = ctx.createLinearGradient(0, FLOOR, 0, FLOOR + 300);
+  fade.addColorStop(0, 'rgba(6,5,7,0.2)'); fade.addColorStop(1, 'rgba(6,5,7,1)');
+  ctx.fillStyle = fade; ctx.fillRect(0, FLOOR, W, H - FLOOR);
+  cards.forEach(({ a, opt, x }) => {                              // colored light pooling on the floor
+    if (a <= 0) return;
+    const g = ctx.createRadialGradient(x, FLOOR, 10, x, FLOOR, 360);
+    g.addColorStop(0, `rgba(${opt.glow},${0.35 * a})`); g.addColorStop(1, `rgba(${opt.glow},0)`);
+    ctx.save(); ctx.translate(x, FLOOR); ctx.scale(1, 0.12); ctx.translate(-x, -FLOOR);
+    ctx.fillStyle = g; ctx.fillRect(x - 400, FLOOR - 400, 800, 800);
+    ctx.restore();
+  });
+
+  drawCursor(t);
+
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.4, W / 2, H / 2, W * 0.65);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.7)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  ctx.save();
+  ctx.globalAlpha = 0.05; ctx.globalCompositeOperation = 'overlay';
+  const f = Math.floor(tAbs * FPS);
+  ctx.translate(-hash(f) * 256, -hash(f + 0.5) * 256);
+  ctx.fillStyle = ctx.createPattern(grain, 'repeat'); ctx.fillRect(0, 0, W + 256, H + 256);
+  ctx.restore();
+}
+</script>
+<script src="carousel-audio.js"></script>
+<script>
+// ---------- boot ----------
+window.ready = Promise.all([
+  document.fonts.load(`600 30px ${SANS}`), document.fonts.load(`500 12px ${MONO}`),
+]).catch(() => {}).then(() => renderFrame(0));
+window.renderFrame = renderFrame;
+window.DURATION = DURATION; window.FPS = FPS;
+
+if (new URLSearchParams(location.search).has('render')) {
+  document.body.classList.add('render');
+} else {
+  let t = 0, playing = true, last = performance.now(), actx = null, buf = null, src = null, startAt = 0;
+  const stopAudio = () => { if (src) { src.stop(); src = null; } };
+  const playAudio = () => {
+    if (!actx || !buf) return;
+    stopAudio();
+    src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+    src.start(0, t); startAt = actx.currentTime - t;
+  };
+  addEventListener('click', async () => {
+    if (actx) return;
+    actx = new AudioContext();
+    buf = await renderSoundtrack(actx.sampleRate);
+    if (playing) playAudio();
+  });
+  window.ready.then(() => requestAnimationFrame(function loop(now) {
+    if (playing) {
+      if (src) t = actx.currentTime - startAt; else t += (now - last) / 1000;
+      if (t >= DURATION) { t = 0; playAudio(); }
+    }
+    last = now;
+    renderFrame(t);
+    requestAnimationFrame(loop);
+  }));
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') { playing = !playing; playing ? playAudio() : stopAudio(); }
+    const step = 1 / FPS * (e.shiftKey ? 30 : 1);
+    if (e.code === 'ArrowRight') { t = Math.min(DURATION, t + step); if (playing) playAudio(); }
+    if (e.code === 'ArrowLeft') { t = Math.max(0, t - step); if (playing) playAudio(); }
+    if (e.key === 'r') { t = 0; if (playing) playAudio(); }
+  });
+}
+</script>
+</body>
+</html>

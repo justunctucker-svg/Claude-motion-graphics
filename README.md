@@ -65,3 +65,22 @@ Add `?sfx=retro` to the page (or run `npm run render:asap-retro`) and the same v
 ```bash
 npm run render:asap-friendly   # → out/asap-electric-friendly.mp4
 ```
+
+---
+
+# Element carousel
+
+`carousel.html` + `carousel-audio.js`: a 1920×1080 loop of four glowing pill cards (**Ember, Solar, Breeze, Bloom**). A cursor clicks the next card, the carousel glides over, and the card that lands plays its own effect:
+
+- **Ember:** catches fire, with flames and rising sparks
+- **Solar:** a gold rim draws itself on and sun rays burst out behind the card
+- **Breeze:** wind streaks swirl around the card
+- **Bloom:** lotus petals unfold behind and in front of the card
+
+The background and floor light shift to each card's color, and everything reflects on the floor. Each effect has a matching sound (fire whoomp and crackle, solar shimmer, wind swirl, harp-like chimes) along with a click and a glide on every step. One loop is 14s and loops seamlessly; the render plays it twice (28s).
+
+```bash
+npm run render:carousel   # → out/carousel.mp4
+```
+
+To change the cards, edit `OPTIONS` at the top of `carousel.html`.
