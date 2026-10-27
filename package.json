@@ -7,7 +7,8 @@
     "preview:asap": "node render.js asap-electric.html out/asap-preview.mp4 --preview",
     "render:asap-retro": "node render.js asap-electric.html out/asap-electric-retro.mp4 --query sfx=retro",
     "render:asap-friendly": "node render.js asap-electric-friendly.html out/asap-electric-friendly.mp4",
-    "render:carousel": "node render.js carousel.html out/carousel.mp4"
+    "render:carousel": "node render.js carousel.html out/carousel.mp4",
+    "render:next-video": "node render.js next-video.html out/next-video.mp4"
   },
   "devDependencies": {
     "playwright": "^1.48.0"

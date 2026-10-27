@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Next Video Poll</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { width: min(100vw, 56.25vh); height: min(100vh, 177.78vw); display: block; }
+  #hint { position: fixed; bottom: 10px; left: 0; right: 0; text-align: center; color: #fff8;
+          font: 12px monospace; pointer-events: none; }
+  body.render #hint { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1080" height="1920"></canvas>
+<div id="hint">click: sound on · space: pause · ←/→: scrub · r: restart</div>
+<script>
+// "What should I animate next?" YouTube Short for an aerospace / engineering 3D channel.
+// Blueprint look: wireframe models assemble, spin up and get callouts, then a recap grid asks
+// viewers to vote in the comments. Picture and sound share one timeline.
+const W = 1080, H = 1920, DURATION = 21, FPS = 30;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+const SANS = '"Inter Display", "Inter", system-ui, sans-serif';
+const MONO = '"DejaVu Sans Mono", Menlo, Consolas, monospace';
+const CYAN = '#3fd8ff', CYAN_RGB = '63,216,255', ORANGE = '#ff7a2f', ORANGE_RGB = '255,122,47';
+const COLORS = { c: CYAN_RGB, o: ORANGE_RGB, w: '235,245,255' };
+
+// ---------- helpers ----------
+const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const range = (t, a, b) => clamp((t - a) / (b - a));
+const easeOutCubic = k => 1 - Math.pow(1 - k, 3);
+const easeInCubic = k => k * k * k;
+const easeInOutCubic = k => k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
+const easeOutBack = k => { const c = 1.7; return 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2); };
+const easeOutExpo = k => k >= 1 ? 1 : 1 - Math.pow(2, -10 * k);
+const bump = k => Math.sin(clamp(k) * Math.PI);
+function hash(n) { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); }
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const font = (w, px, fam = SANS) => `${w} ${px}px ${fam}`;
+
+// ---------- timeline ----------
+const T = { hook: 0, opts: [2.8, 6.0, 9.2, 12.4], optLen: 3.2, summary: 15.6 };
+const LETTERS = ['A', 'B', 'C', 'D'];
+
+// ---------- wireframe models ----------
+// Each model returns line segments [a, b, color] in model space, in build order,
+// so drawing the first N of them makes the model assemble itself.
+const seg = (out, a, b, c = 'c') => out.push([a, b, c]);
+function circle(out, r, map, n = 36, c = 'c') {
+  for (let i = 0; i < n; i++) {
+    const a0 = i / n * Math.PI * 2, a1 = (i + 1) / n * Math.PI * 2;
+    seg(out, map(Math.cos(a0) * r, Math.sin(a0) * r), map(Math.cos(a1) * r, Math.sin(a1) * r), c);
+  }
+}
+const atZ = z => (u, v) => [u, v, z];
+const atY = y => (u, v) => [u, y, v];
+
+function landingGear(k) {
+  // k: 0 = down and locked, 1 = retracted into the well
+  const out = [], P = [0, 1.0, 0], ang = k * Math.PI / 2 * 0.95;
+  const R = p => { const dy = p[1] - P[1], dz = p[2] - P[2]; return [p[0], P[1] + dy * Math.cos(ang) - dz * Math.sin(ang), P[2] + dy * Math.sin(ang) + dz * Math.cos(ang)]; };
+  const bay = [[-0.62, 1.12, -1.95], [0.62, 1.12, -1.95], [0.62, 1.12, 0.3], [-0.62, 1.12, 0.3]];
+  bay.forEach((p, i) => seg(out, p, bay[(i + 1) % 4], 'o'));
+  seg(out, [-0.62, 1.12, -0.8], [0.62, 1.12, -0.8], 'o');
+  const strut = [[1.0, 0.1], [0.6, 0.1], [0.2, 0.1], [0.2, 0.065], [-0.2, 0.065], [-0.55, 0.065]];
+  strut.forEach(([y, r]) => circle(out, r, (u, v) => R([u, y, v]), 12, 'w'));
+  for (let i = 0; i < 4; i++) {
+    const a = i * Math.PI / 2;
+    seg(out, R([Math.cos(a) * 0.1, 1.0, Math.sin(a) * 0.1]), R([Math.cos(a) * 0.1, 0.2, Math.sin(a) * 0.1]), 'w');
+    seg(out, R([Math.cos(a) * 0.065, 0.2, Math.sin(a) * 0.065]), R([Math.cos(a) * 0.065, -0.55, Math.sin(a) * 0.065]), 'w');
+  }
+  seg(out, R([-0.45, -0.6, 0]), R([0.45, -0.6, 0]), 'o');
+  [-0.32, 0.32].forEach(sx => {                                      // twin wheels
+    [-0.1, 0.1].forEach(off => circle(out, 0.36, (u, v) => R([sx + off, -0.6 + u, v]), 24));
+    circle(out, 0.12, (u, v) => R([sx + 0.1 * Math.sign(sx), -0.6 + u, v]), 12, 'w');
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * Math.PI * 2, u = Math.cos(a) * 0.36, v = Math.sin(a) * 0.36;
+      seg(out, R([sx - 0.1, -0.6 + u, v]), R([sx + 0.1, -0.6 + u, v]));
+      if (i % 2 === 0) seg(out, R([sx + 0.1 * Math.sign(sx), -0.6 + Math.cos(a) * 0.12, Math.sin(a) * 0.12]), R([sx + 0.1 * Math.sign(sx), -0.6 + u, v]), 'w');
+    }
+  });
+  seg(out, R([0, 0.15, 0.13]), R([0, -0.15, 0.24]), 'o'); seg(out, R([0, -0.15, 0.24]), R([0, -0.45, 0.1]), 'o');   // torque link
+  const A = [0, 1.08, -1.0], B = R([0, 0.1, 0]);                       // folding drag brace
+  const K = [0, (A[1] + B[1]) / 2 + 0.05 + 0.45 * k, (A[2] + B[2]) / 2];
+  seg(out, A, K, 'o'); seg(out, K, B, 'o');
+  return out;
+}
+
+function wing(k) {
+  // k: 0 = flap stowed, 1 = Fowler flap fully deployed (slides aft and drops)
+  const out = [];
+  const yt = x => 5 * 0.13 * (0.2969 * Math.sqrt(x) - 0.126 * x - 0.3516 * x * x + 0.2843 * x ** 3 - 0.1036 * x ** 4);
+  const yc = x => 0.16 * x * (1 - x);
+  const MAIN = [0, 0.025, 0.08, 0.18, 0.32, 0.5, 0.65, 0.75], FLAP = [0.75, 0.85, 0.95, 1.0];
+  const H = [0.75, yc(0.75) - yt(0.75)], a = k * 0.6;
+  const flapPt = ([x, y]) => {
+    const dx = x - H[0], dy = y - H[1];
+    return [H[0] + dx * Math.cos(a) + dy * Math.sin(a) + k * 0.07, H[1] - dx * Math.sin(a) + dy * Math.cos(a)];
+  };
+  const station = s => {
+    const c = lerp(1.15, 0.7, Math.abs(s) / 1.4), z0 = -0.45 + Math.abs(s) * 0.35;
+    return ([x, y]) => [s, y * c, z0 + x * c];
+  };
+  const SPAN = [-1.4, -0.47, 0.47, 1.4];
+  const mainProfile = [...MAIN.map(x => [x, yc(x) + yt(x)]), ...MAIN.slice().reverse().map(x => [x, yc(x) - yt(x)])];
+  const flapProfile = [...FLAP.map(x => [x, yc(x) + yt(x) * 0.9]), ...FLAP.slice().reverse().map(x => [x, yc(x) - yt(x) * 0.9])].map(flapPt);
+  SPAN.forEach(s => {
+    const st = station(s);
+    mainProfile.forEach((p, i) => i && seg(out, st(mainProfile[i - 1]), st(p)));
+    seg(out, st(mainProfile[mainProfile.length - 1]), st(mainProfile[0]));
+    seg(out, st([0.25, yc(0.25) + yt(0.25)]), st([0.25, yc(0.25) - yt(0.25)]), 'w');          // spar
+  });
+  for (let i = 0; i < SPAN.length - 1; i++) {
+    const s0 = station(SPAN[i]), s1 = station(SPAN[i + 1]);
+    [[0, 0], [0.32, 1], [0.32, -1], [0.75, 1], [0.75, -1]].forEach(([x, side]) => seg(out, s0([x, yc(x) + side * yt(x)]), s1([x, yc(x) + side * yt(x)])));
+    seg(out, s0([0.25, yc(0.25) + yt(0.25)]), s1([0.25, yc(0.25) + yt(0.25)]), 'w');
+  }
+  SPAN.forEach(s => {
+    const st = station(s);
+    flapProfile.forEach((p, i) => i && seg(out, st(flapProfile[i - 1]), st(p), 'o'));
+    seg(out, st(flapProfile[flapProfile.length - 1]), st(flapProfile[0]), 'o');
+  });
+  for (let i = 0; i < SPAN.length - 1; i++) {
+    const s0 = station(SPAN[i]), s1 = station(SPAN[i + 1]);
+    [0, 3, 4].forEach(j => seg(out, s0(flapProfile[j]), s1(flapProfile[j]), 'o'));
+  }
+  return out;
+}
+wing.flapTip = (k, s) => {                                             // trailing edge point, for the callout
+  const c = lerp(1.15, 0.7, Math.abs(s) / 1.4), z0 = -0.45 + Math.abs(s) * 0.35, a = k * 0.6;
+  const Hy = 0.16 * 0.75 * 0.25 - 0.06, dx = 0.25;
+  return [s, (Hy - dx * Math.sin(a)) * c, z0 + (0.75 + dx * Math.cos(a) + k * 0.07) * c];
+};
+
+function rotor(s, t) {
+  const out = [];
+  [-1.0, -0.2, 0.35].forEach(y => circle(out, 0.07, atY(y), 10, 'w'));
+  [0, Math.PI / 2, Math.PI, Math.PI * 1.5].forEach(a => seg(out, [Math.cos(a) * 0.07, -1.0, Math.sin(a) * 0.07], [Math.cos(a) * 0.07, 0.35, Math.sin(a) * 0.07], 'w'));
+  const tilt = 0.14 * Math.sin(t * 2.2);
+  const swash = (y, r, rot) => (u, v) => {
+    const a = Math.atan2(v, u) + rot, rr = Math.hypot(u, v);
+    const x = Math.cos(a) * rr, z = Math.sin(a) * rr;
+    return [x, y + z * tilt, z];
+  };
+  circle(out, 0.46, swash(-0.47, 0.46, 0), 32, 'o');
+  circle(out, 0.4, swash(-0.38, 0.4, s), 32, 'o');
+  circle(out, 0.26, atY(0.34), 20);
+  for (let k = 0; k < 4; k++) {
+    const a = s + k * Math.PI / 2, c = Math.cos(a), sn = Math.sin(a);
+    const root = [c * 0.4, -0.38 + sn * 0.4 * tilt, sn * 0.4];
+    seg(out, root, [c * 0.3, 0.32, sn * 0.3], 'o');                // pitch link
+    const w = 0.07, L0 = 0.26, L1 = 2.0, pitch = 0.08 * Math.sin(a) + tilt;
+    const P = (r, side) => [c * r - sn * side * w, 0.35 + side * w * pitch * 3, sn * r + c * side * w];
+    seg(out, P(L0, 1), P(L1, 1)); seg(out, P(L0, -1), P(L1, -1)); seg(out, P(L1, 1), P(L1, -1));
+    seg(out, P(L0, 1), P(L0, -1));
+  }
+  return out;
+}
+
+function satellite(u, t) {
+  const out = [], bx = 0.35, by = 0.42, bz = 0.35;
+  const V = [[-bx, -by, -bz], [bx, -by, -bz], [bx, by, -bz], [-bx, by, -bz], [-bx, -by, bz], [bx, -by, bz], [bx, by, bz], [-bx, by, bz]];
+  [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]].forEach(([a, b]) => seg(out, V[a], V[b], 'w'));
+  for (let i = 1; i < 4; i++) seg(out, [-bx, -by + i * 0.21, bz], [bx, -by + i * 0.21, bz], 'o');
+  seg(out, [0, by, 0], [0, by + 0.45, 0], 'w'); seg(out, [-0.08, by + 0.38, 0], [0.08, by + 0.38, 0], 'w');
+  for (let k = 1; k <= 3; k++) circle(out, k * 0.11, atZ(bz + 0.03 + k * k * 0.018), 18, 'o');   // dish
+  [[0.33, 0], [-0.33, 0], [0, 0.33], [0, -0.33]].forEach(([x, y]) => seg(out, [x, y, bz + 0.2], [0, 0, bz + 0.5], 'o'));
+  [-1, 1].forEach(side => {                                          // accordion solar arrays
+    const x0 = side * (bx + 0.12);
+    seg(out, [side * bx, 0, 0], [x0, 0, 0], 'w');
+    let P = [x0, 0, 0];
+    for (let j = 0; j < 3; j++) {
+      const th = (j % 2 ? -1 : 1) * (1 - u) * 1.45;
+      const e = [Math.cos(th) * 0.55 * side, 0, Math.sin(th) * 0.55];
+      const Q = [P[0] + e[0], 0, P[2] + e[2]];
+      const c = (p, y) => [p[0], y, p[2]];
+      const at = (f, y) => [lerp(P[0], Q[0], f), y, lerp(P[2], Q[2], f)];
+      seg(out, c(P, -0.45), c(Q, -0.45)); seg(out, c(Q, -0.45), c(Q, 0.45)); seg(out, c(Q, 0.45), c(P, 0.45)); seg(out, c(P, 0.45), c(P, -0.45));
+      seg(out, at(1 / 3, -0.45), at(1 / 3, 0.45)); seg(out, at(2 / 3, -0.45), at(2 / 3, 0.45)); seg(out, at(0, 0), at(1, 0));
+      P = Q;
+    }
+  });
+  return out;
+}
+
+// ---------- options ----------
+const gearK = lt => easeInOutCubic(range(lt, 1.3, 2.1)) - easeInOutCubic(range(lt, 2.3, 3.0));
+const flapK = lt => easeInOutCubic(range(lt, 1.3, 2.2));
+const OPTIONS = [
+  { title: ['HOW LANDING', 'GEAR RETRACTS'], short: ['LANDING', 'GEAR'], view: { yaw: -0.75, pitch: 0.3, scale: 215, cy: 1000, mini: 0.55 },
+    model: lt => landingGear(gearK(lt)), loop: t => 1.3 + 0.8 * (0.5 - 0.5 * Math.cos(t * 1.6)),
+    callouts: [{ at: [0.62, 1.12, -0.8], label: 'WHEEL WELL', dx: 170, dy: -50 },
+               { at: lt => { const a = gearK(lt) * Math.PI / 2 * 0.95; return [0, 1.0 - 0.6 * Math.cos(a), -0.6 * Math.sin(a)]; }, label: 'OLEO STRUT', dx: 170, dy: 110 },
+               { at: [0, 0.6, -0.5], label: 'DRAG BRACE', dx: -200, dy: 140 }] },
+  { title: ['HOW WING', 'FLAPS WORK'], short: ['WING', 'FLAPS'], view: { yaw: -0.7, pitch: 0.62, scale: 300, mini: 0.42, swing: 0.3 },
+    model: lt => wing(flapK(lt)), loop: t => 1.3 + 0.9 * (0.5 - 0.5 * Math.cos(t * 1.6)),
+    callouts: [{ at: lt => wing.flapTip(flapK(lt), 0.47), label: 'FOWLER FLAP', dx: 150, dy: 55 },
+               { at: [-1.4, 0.02, 0.04], label: 'LEADING EDGE', dx: -150, dy: -190 },
+               { at: [0.47, 0.08, -0.06], label: 'MAIN SPAR', dx: 150, dy: -210 }] },
+  { title: ['HOW HELICOPTERS', 'STEER'], short: ['HELICOPTER', 'STEERING'], view: { yaw: 0.4, pitch: 0.42, scale: 255 },
+    model: (lt, t) => rotor(spinOf(lt) * 1.4, t),
+    callouts: [{ at: [0.46, -0.47, 0], label: 'SWASHPLATE', dx: 170, dy: 160 }, { at: [0.3, 0, 0.1], label: 'PITCH LINK', dx: -260, dy: 150 },
+               { at: [1.6, 0.35, 0], label: 'MAIN ROTOR', dx: -40, dy: -220 }] },
+  { title: ['SATELLITE', 'DEPLOYMENT'], short: ['SATELLITE', 'DEPLOY'], view: { yaw: 0.55, pitch: 0.3, scale: 235 },
+    model: lt => satellite(easeInOutCubic(range(lt, 1.0, 2.0))), unfold: true,
+    callouts: [{ at: [1.4, 0.45, 0], label: 'SOLAR ARRAY', dx: -120, dy: -220 }, { at: [0, 0, 0.6], label: 'DISH', dx: -230, dy: 120 },
+               { at: [0, 0.85, 0], label: 'ANTENNA', dx: 150, dy: -120 }] },
+];
+// fan/rotor spin: still while assembling, then spins up
+const spinOf = lt => lt < 1 ? 0 : lt < 2 ? 3 * (lt - 1) ** 2 : 3 + 6 * (lt - 2);
+
+function project([x, y, z], yaw, pitch, scale, cx, cy) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  const x1 = x * c + z * s, z1 = -x * s + z * c;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const y2 = y * cp - z1 * sp, z2 = y * sp + z1 * cp;
+  const f = 6 / (6 + z2);
+  return { x: cx + x1 * scale * f, y: cy - y2 * scale * f, z: z2 };
+}
+function drawModel(segs, view, yaw, cx, cy, scale, build = 1, alpha = 1) {
+  const n = Math.floor(segs.length * build);
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < n; i++) {
+      const [a, b, col] = segs[i];
+      const p = project(a, yaw, view.pitch, scale, cx, cy), q = project(b, yaw, view.pitch, scale, cx, cy);
+      const depth = clamp(0.35 + 0.65 * (1 - ((p.z + q.z) / 2 + 1.5) / 3));
+      const fresh = i > n - 25 ? 1 : 0;                          // newest edges flash white
+      const rgb = fresh ? '255,255,255' : COLORS[col];
+      ctx.strokeStyle = `rgba(${rgb},${(pass ? 0.9 : 0.18) * depth * alpha})`;
+      ctx.lineWidth = pass ? 1.8 : 7;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// ---------- shared drawing ----------
+function hexPath(c, x, y, r) {
+  c.beginPath();
+  for (let i = 0; i < 6; i++) { const a = Math.PI / 6 + i * Math.PI / 3; c.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+  c.closePath();
+}
+function badge(letter, x, y, r, k, filled = false) {
+  if (k <= 0) return;
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(k, k);
+  hexPath(ctx, 0, 0, r);
+  ctx.fillStyle = filled ? CYAN : 'rgba(10,25,40,0.85)'; ctx.fill();
+  ctx.strokeStyle = CYAN; ctx.lineWidth = Math.max(2, r * 0.07);
+  ctx.shadowColor = CYAN; ctx.shadowBlur = r * 0.5; ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = filled ? '#061018' : '#fff'; ctx.textAlign = 'center';
+  ctx.font = font(900, r * 1.15); ctx.fillText(letter, 0, r * 0.4);
+  ctx.restore();
+}
+function text(str, x, y, { size = 60, weight = 800, color = '#fff', align = 'center', alpha = 1, fam = SANS, glow = 0 } = {}) {
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.globalAlpha *= alpha;
+  ctx.font = font(weight, size, fam); ctx.textAlign = align;
+  if (glow) { ctx.shadowColor = color; ctx.shadowBlur = glow; }
+  ctx.fillStyle = color; ctx.fillText(str, x, y);
+  ctx.restore();
+}
+// letters slam in one by one; returns time the last letter lands
+function slamText(str, x, y, t, t0, step, { size, color = '#fff', weight = 900 }) {
+  ctx.font = font(weight, size);
+  const chars = [...str], ws = chars.map(ch => ctx.measureText(ch).width);
+  let cx = x - ws.reduce((a, b) => a + b, 0) / 2;
+  chars.forEach((ch, i) => {
+    const k = range(t, t0 + i * step, t0 + i * step + 0.22);
+    if (k > 0 && ch !== ' ') {
+      const e = easeOutExpo(k);
+      ctx.save();
+      ctx.translate(cx + ws[i] / 2, y); ctx.scale(1 + 0.8 * (1 - e), 1 + 0.8 * (1 - e));
+      ctx.globalAlpha *= clamp(k * 3);
+      ctx.font = font(weight, size); ctx.textAlign = 'center';
+      ctx.shadowColor = color; ctx.shadowBlur = 20 * (1 - e) + 6;
+      ctx.fillStyle = color; ctx.fillText(ch, 0, 0);
+      ctx.restore();
+    }
+    cx += ws[i];
+  });
+}
+
+function drawGrid(t) {
+  const reveal = easeOutCubic(range(t, 0, 0.9));
+  const off = (t * 18) % 60;
+  ctx.save();
+  for (let x = -60; x <= W + 60; x += 60) {
+    const major = Math.round((x + 60) / 60) % 5 === 0;
+    const len = H * reveal;
+    ctx.strokeStyle = `rgba(${CYAN_RGB},${major ? 0.13 : 0.055})`; ctx.lineWidth = major ? 1.5 : 1;
+    ctx.beginPath(); ctx.moveTo(x, H / 2 - len / 2); ctx.lineTo(x, H / 2 + len / 2); ctx.stroke();
+  }
+  for (let y = -60; y <= H + 60; y += 60) {
+    const yy = y + off;
+    const major = Math.round((y + 60) / 60) % 5 === 0;
+    const len = W * reveal;
+    ctx.strokeStyle = `rgba(${CYAN_RGB},${major ? 0.13 : 0.055})`; ctx.lineWidth = major ? 1.5 : 1;
+    ctx.beginPath(); ctx.moveTo(W / 2 - len / 2, yy); ctx.lineTo(W / 2 + len / 2, yy); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHUD(t) {
+  const a = range(t, 0.3, 0.8) * 0.7;
+  if (a <= 0) return;
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = CYAN; ctx.lineWidth = 3;
+  const m = 44, s = 44;
+  [[m, m + 60, 1, 1], [W - m, m + 60, -1, 1], [m, H - m - 60, 1, -1], [W - m, H - m - 60, -1, -1]].forEach(([x, y, dx, dy]) => {
+    ctx.beginPath(); ctx.moveTo(x, y + s * dy); ctx.lineTo(x, y); ctx.lineTo(x + s * dx, y); ctx.stroke();
+  });
+  const f = Math.floor(t * FPS);
+  text('NEXT_PROJECT // SELECT', m + 20, 160, { size: 24, weight: 700, fam: MONO, color: CYAN, align: 'left' });
+  text(`FRAME ${String(f).padStart(4, '0')}`, W - m - 20, 160, { size: 24, weight: 700, fam: MONO, color: CYAN, align: 'right' });
+  ctx.restore();
+}
+
+// ---------- hook ----------
+function drawHook(t) {
+  if (t > T.opts[0]) return;
+  const out = easeInCubic(range(t, 2.45, 2.8));
+  ctx.save();
+  ctx.globalAlpha = 1 - out;
+  ctx.translate(W / 2, 900); ctx.scale(1 + out * 0.4, 1 + out * 0.4); ctx.translate(-W / 2, -900);
+  drawModel(wing(0.5 - 0.5 * Math.cos(t * 2)), { pitch: 0.4 }, t * 0.5 - 0.3, W / 2, 900, 380, easeInOutCubic(range(t, 0.1, 1.8)), 0.22);
+  slamText('WHAT SHOULD I', W / 2, 840, t, 0.35, 0.045, { size: 92 });
+  slamText('ANIMATE NEXT?', W / 2, 960, t, 0.35 + 13 * 0.045, 0.045, { size: 100, color: CYAN });
+  // blueprint dimension brackets around the title
+  const d = easeOutCubic(range(t, 1.35, 1.8));
+  if (d > 0) {
+    ctx.strokeStyle = `rgba(${ORANGE_RGB},0.9)`; ctx.lineWidth = 3;
+    const y0 = 740, y1 = 1010, half = 450 * d;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - half, y0); ctx.lineTo(W / 2 + half, y0);
+    ctx.moveTo(W / 2 - half, y0 - 14); ctx.lineTo(W / 2 - half, y0 + 14); ctx.moveTo(W / 2 + half, y0 - 14); ctx.lineTo(W / 2 + half, y0 + 14);
+    ctx.moveTo(W / 2 - half, y1 + 30); ctx.lineTo(W / 2 + half, y1 + 30);
+    ctx.stroke();
+  }
+  const sub = 'YOU DECIDE.', shown = Math.floor(sub.length * range(t, 1.6, 2.0));
+  text(sub.slice(0, shown), W / 2, 1110, { size: 54, weight: 700, fam: MONO, color: ORANGE, glow: 14 });
+  ctx.restore();
+}
+
+// ---------- option cards ----------
+const calloutTime = (i, j) => T.opts[i] + 1.25 + j * 0.2;
+function drawOption(i, t) {
+  const lt = t - T.opts[i];
+  if (lt < -0.05 || lt > T.optLen + 0.05) return;
+  const opt = OPTIONS[i];
+  const inK = easeOutCubic(range(lt, 0, 0.45)), outK = easeInCubic(range(lt, T.optLen - 0.3, T.optLen));
+  const dx = (1 - inK) * W * 0.9 - outK * W * 0.9;
+  const cx = W / 2 + dx, cy = opt.view.cy || 860;
+  const yaw = opt.view.yaw + (opt.view.swing ? Math.sin(lt * 0.9) * opt.view.swing : lt * 0.55) + (1 - inK) * 0.8;
+  const build = easeInOutCubic(range(lt, 0.15, 1.15));
+  const segs = opt.model(lt, t);
+
+  // scan line wipe on entry
+  const scan = range(lt, 0, 0.4);
+  if (scan > 0 && scan < 1) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const y = lerp(300, 1500, scan);
+    const g = ctx.createLinearGradient(0, y - 60, 0, y);
+    g.addColorStop(0, `rgba(${CYAN_RGB},0)`); g.addColorStop(1, `rgba(${CYAN_RGB},0.35)`);
+    ctx.fillStyle = g; ctx.fillRect(0, y - 60, W, 60);
+    ctx.fillStyle = `rgba(${CYAN_RGB},0.9)`; ctx.fillRect(0, y - 2, W, 3);
+    ctx.restore();
+  }
+
+  // model
+  drawModel(segs, opt.view, yaw, cx, cy, opt.view.scale, build);
+  ctx.save();
+  ctx.globalAlpha = 1 - outK;
+  ctx.translate(dx, 0);
+  // callouts: leader line, elbow, label
+  opt.callouts.forEach((c, j) => {
+    const k = range(t, calloutTime(i, j), calloutTime(i, j) + 0.3);
+    if (k <= 0) return;
+    const p = project(typeof c.at === 'function' ? c.at(lt) : c.at, yaw, opt.view.pitch, opt.view.scale, W / 2, cy);
+    const ex = p.x + c.dx * easeOutCubic(k), ey = p.y + c.dy * easeOutCubic(k);
+    const dir = c.dx >= 0 ? 1 : -1;
+    ctx.strokeStyle = ORANGE; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(ex, ey); ctx.lineTo(ex + dir * 40 * k, ey); ctx.stroke();
+    ctx.fillStyle = ORANGE; ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2); ctx.fill();
+    const lk = range(t, calloutTime(i, j) + 0.15, calloutTime(i, j) + 0.4);
+    if (lk > 0) {
+      ctx.font = font(700, 28, MONO);
+      const shown = c.label.slice(0, Math.ceil(c.label.length * lk));
+      const w = ctx.measureText(c.label).width + 24;
+      const bx = clamp(dir > 0 ? ex + 44 : ex - 44 - w, 30, W - 30 - w);
+      ctx.fillStyle = 'rgba(8,16,26,0.85)'; ctx.fillRect(bx, ey - 22, w, 44);
+      ctx.strokeStyle = `rgba(${ORANGE_RGB},0.8)`; ctx.lineWidth = 2; ctx.strokeRect(bx, ey - 22, w, 44);
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.fillText(shown, bx + 12, ey + 10);
+    }
+  });
+  // header, badge, title
+  text('WHAT SHOULD I ANIMATE NEXT?', W / 2, 270, { size: 34, weight: 700, fam: MONO, color: 'rgba(235,245,255,0.75)' });
+  badge(LETTERS[i], W / 2, 410, 74, easeOutBack(range(lt, 0.3, 0.65)));
+  opt.title.forEach((ln, j) => {
+    const k = easeOutCubic(range(lt, 0.55 + j * 0.12, 0.95 + j * 0.12));
+    text(ln, W / 2, 1300 + j * 96 + (1 - k) * 40, { size: 88, weight: 900, alpha: k });
+  });
+  const vk = range(lt, 1.0, 1.4);
+  text(`COMMENT "${LETTERS[i]}" TO VOTE`.slice(0, Math.ceil(22 * vk)), W / 2, 1500, { size: 36, weight: 700, fam: MONO, color: ORANGE, glow: 10 });
+  text(`YAW ${(((yaw * 180 / Math.PI) % 360 + 360) % 360).toFixed(1).padStart(5, '0')}°`, 90, 1180, { size: 24, weight: 700, fam: MONO, color: CYAN, align: 'left', alpha: build });
+  text(`BUILD ${String(Math.round(build * 100)).padStart(3, ' ')}%`, W - 90, 1180, { size: 24, weight: 700, fam: MONO, color: CYAN, align: 'right', alpha: build > 0 ? 1 : 0 });
+  ctx.restore();
+  // progress pips (stay put while the card slides)
+  ctx.save();
+  ctx.globalAlpha = range(lt, 0, 0.3) * (i === 3 ? 1 - outK : 1);
+  LETTERS.forEach((L, j) => badge(L, W / 2 + (j - 1.5) * 90, 1590, 30, 1, j === i));
+  ctx.restore();
+}
+
+// ---------- recap grid ----------
+const TILE_X = [70, 560], TILE_Y = [470, 950], TILE = 450;
+const tileTime = i => T.summary + 0.35 + i * 0.15;
+const highlightTime = i => T.summary + 1.5 + i * 0.45;
+const CTA_T = T.summary + 3.4;
+function drawSummary(t) {
+  const lt = t - T.summary;
+  if (lt < 0) return;
+  ctx.save();
+  slamText('WHICH ONE', W / 2, 300, t, T.summary + 0.05, 0.03, { size: 96 });
+  slamText('SHOULD I MAKE?', W / 2, 400, t, T.summary + 0.3, 0.03, { size: 96, color: CYAN });
+  OPTIONS.forEach((opt, i) => {
+    const k = easeOutBack(range(t, tileTime(i), tileTime(i) + 0.4));
+    if (k <= 0) return;
+    const x = TILE_X[i % 2], y = TILE_Y[Math.floor(i / 2)];
+    const hl = t >= highlightTime(i) ? bump(range(t, highlightTime(i), highlightTime(i) + 0.45)) : 0;
+    const allPulse = t > CTA_T ? 0.35 + 0.25 * Math.sin((t - CTA_T) * 4 + i) : 0;
+    const glow = Math.max(hl, allPulse);
+    ctx.save();
+    ctx.translate(x + TILE / 2, y + TILE / 2); ctx.scale(k * (1 + 0.04 * hl), k * (1 + 0.04 * hl)); ctx.translate(-TILE / 2, -TILE / 2);
+    ctx.fillStyle = 'rgba(8,18,30,0.85)';
+    ctx.beginPath(); ctx.roundRect(0, 0, TILE, TILE, 28); ctx.fill();
+    ctx.strokeStyle = `rgba(${CYAN_RGB},${0.35 + 0.65 * glow})`; ctx.lineWidth = 3 + 3 * glow;
+    ctx.shadowColor = CYAN; ctx.shadowBlur = 30 * glow; ctx.stroke(); ctx.shadowBlur = 0;
+    ctx.restore();
+    const lt2 = t - tileTime(i) + 1.6;
+    const mx = x + TILE / 2, my = y + 175 + ((opt.view.cy || 860) - 860) * 0.33;
+    drawModel(opt.model(opt.loop ? opt.loop(t) : lt2, t), opt.view, opt.view.yaw + (opt.view.swing ? Math.sin(t) * opt.view.swing : t * 0.6), mx, my, opt.view.scale * (opt.view.mini || 0.33) * k, 1, 0.9);
+    badge(LETTERS[i], x + 58, y + 62, 34, k, hl > 0.3);
+    opt.short.forEach((ln, j) => text(ln, mx, y + 372 + j * 46, { size: 40, weight: 900, alpha: clamp(k) }));
+  });
+  const c = easeOutCubic(range(t, CTA_T, CTA_T + 0.4));
+  if (c > 0) {
+    text('COMMENT A, B, C OR D', W / 2, 1520 + (1 - c) * 30, { size: 66, weight: 900, color: ORANGE, alpha: c, glow: 18 });
+    const bob = Math.sin((t - CTA_T) * 6) * 10;
+    ctx.save();
+    ctx.globalAlpha = c;
+    ctx.strokeStyle = ORANGE; ctx.lineWidth = 7; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(W / 2, 1560 + bob); ctx.lineTo(W / 2, 1620 + bob);
+    ctx.moveTo(W / 2 - 22, 1598 + bob); ctx.lineTo(W / 2, 1622 + bob); ctx.lineTo(W / 2 + 22, 1598 + bob); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// ---------- frame ----------
+function renderFrame(t) {
+  t = clamp(t, 0, DURATION);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  const g = ctx.createRadialGradient(W / 2, 860, 50, W / 2, 900, H * 0.75);
+  g.addColorStop(0, '#0c1c2e'); g.addColorStop(1, '#03060b');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  drawGrid(t);
+  drawHook(t);
+  OPTIONS.forEach((_, i) => drawOption(i, t));
+  drawSummary(t);
+  drawHUD(t);
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.3, W / 2, H / 2, H * 0.72);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(0,0,0,0.6)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+  const black = 1 - range(t, 0, 0.25);
+  if (black > 0) { ctx.fillStyle = `rgba(0,0,0,${black})`; ctx.fillRect(0, 0, W, H); }
+}
+</script>
+<script src="next-video-audio.js"></script>
+<script>
+// ---------- boot ----------
+window.ready = Promise.all([
+  document.fonts.load(font(900, 100)), document.fonts.load(font(800, 100)), document.fonts.load(font(700, 30, MONO)),
+]).catch(() => {}).then(() => renderFrame(0));
+window.renderFrame = renderFrame;
+window.DURATION = DURATION; window.FPS = FPS;
+
+if (new URLSearchParams(location.search).has('render')) {
+  document.body.classList.add('render');
+} else {
+  let t = 0, playing = true, last = performance.now(), actx = null, buf = null, src = null, startAt = 0;
+  const stopAudio = () => { if (src) { src.stop(); src = null; } };
+  const playAudio = () => {
+    if (!actx || !buf) return;
+    stopAudio();
+    src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+    src.start(0, t); startAt = actx.currentTime - t;
+  };
+  addEventListener('click', async () => {
+    if (actx) return;
+    actx = new AudioContext();
+    buf = await renderSoundtrack(actx.sampleRate);
+    if (playing) playAudio();
+  });
+  window.ready.then(() => requestAnimationFrame(function loop(now) {
+    if (playing) {
+      if (src) t = actx.currentTime - startAt; else t += (now - last) / 1000;
+      if (t >= DURATION) { t = 0; playAudio(); }
+    }
+    last = now;
+    renderFrame(t);
+    requestAnimationFrame(loop);
+  }));
+  addEventListener('keydown', e => {
+    if (e.code === 'Space') { playing = !playing; playing ? playAudio() : stopAudio(); }
+    const step = 1 / FPS * (e.shiftKey ? 30 : 1);
+    if (e.code === 'ArrowRight') { t = Math.min(DURATION, t + step); if (playing) playAudio(); }
+    if (e.code === 'ArrowLeft') { t = Math.max(0, t - step); if (playing) playAudio(); }
+    if (e.key === 'r') { t = 0; if (playing) playAudio(); }
+  });
+}
+</script>
+</body>
+</html>

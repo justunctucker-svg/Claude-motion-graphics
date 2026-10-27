@@ -84,3 +84,23 @@ npm run render:carousel   # → out/carousel.mp4
 ```
 
 To change the cards, edit `OPTIONS` at the top of `carousel.html`.
+
+---
+
+# "What should I animate next?" Short
+
+`next-video.html` + `next-video-audio.js`: a 21-second 9:16 YouTube Short for an aerospace / engineering 3D animation channel, in a blueprint style.
+
+| Time | Scene |
+| --- | --- |
+| 0–2.8s | Hook: **WHAT SHOULD I ANIMATE NEXT?** clicks in letter by letter over a wireframe wing, then **YOU DECIDE.** |
+| 2.8–15.6s | Four options, 3.2s each. A wireframe model assembles, then animates (gear retracts and locks, flap deploys, rotor spins, solar arrays unfold) and gets labeled callouts. |
+| 15.6–21s | A 2×2 recap grid; each tile gets a click highlight, then **COMMENT A, B, C OR D** |
+
+Options: **A** landing gear retraction, **B** wing flaps, **C** helicopter swashplate, **D** satellite deployment. To change one, edit its entry in `OPTIONS` (title, short name, model function, view, callouts).
+
+Audio is synthesized from the same timeline: a 110 bpm beat that drops on the first option, plus mechanical clicks, assembly ticks, hydraulic and servo whirs, lock clunks, rotor chop, whooshes and a final chord.
+
+```bash
+npm run render:next-video   # → out/next-video.mp4
+```
